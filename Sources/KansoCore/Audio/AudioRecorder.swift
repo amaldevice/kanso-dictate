@@ -162,6 +162,13 @@ public final class AudioRecorder: @unchecked Sendable {
         )
     }
 
+    /// For testing: allows injecting audio samples into the buffer.
+    public func appendSamplesForTesting(_ samples: [Float]) {
+        lock.withLock {
+            accumulatedSamples.append(contentsOf: samples)
+        }
+    }
+
     private func stopSilently() {
         lock.lock()
         defer { lock.unlock() }

@@ -267,9 +267,27 @@ final class MockSTTEngine: SpeechToTextEngine, @unchecked Sendable {
     }
 }
 
+// Test 15: DictationCoordinator Error Notification & Automatic Recovery
+struct MockFailingSTTEngine: SpeechToTextEngine {
+    let identifier: String = "mock.failing"
+    let displayName: String = "Mock Failing Engine"
+    let isLocal: Bool = false
+    let errorMessage: String
+
+    init(errorMessage: String = "Simulated network failure") {
+        self.errorMessage = errorMessage
+    }
+
+    func transcribe(
+        audioData: Data,
+        language: String?,
+        prompt: String?
+    ) async throws -> TranscriptionResult {
+        throw STTError.networkError(errorMessage)
+    }
+}
 @MainActor
 func testMicroTapGuard() async {
-    // Sub-test A: Micro-tap (< 0.3s) immediately resets to .idle without invoking STT or error
     let mockRecorderA = MockAudioRecorder(stubbedDuration: 0.15)
     let mockEngineA = MockSTTEngine()
     let coordinatorA = DictationCoordinator(
@@ -287,7 +305,6 @@ func testMicroTapGuard() async {
     assert(mockRecorderA.stopRecordingCalled, "stopRecording must be called")
     assert(mockEngineA.transcribeCallCount == 0, "STT must NOT be invoked on micro-tap")
 
-    // Sub-test B: Boundary micro-tap (0.29s) must also reject
     let mockRecorderB = MockAudioRecorder(stubbedDuration: 0.29)
     let mockEngineB = MockSTTEngine()
     let coordinatorB = DictationCoordinator(
@@ -300,7 +317,6 @@ func testMicroTapGuard() async {
     assert(coordinatorB.state == .idle, "Boundary 0.29s tap must reset to idle")
     assert(mockEngineB.transcribeCallCount == 0, "STT must NOT be invoked on 0.29s tap")
 
-    // Sub-test C: Valid recording (>= 0.3s) triggers transcription
     let mockRecorderC = MockAudioRecorder(stubbedDuration: 0.5)
     let mockEngineC = MockSTTEngine()
     let coordinatorC = DictationCoordinator(
@@ -320,5 +336,54 @@ func testMicroTapGuard() async {
 
 await testMicroTapGuard()
 print("✔ DictationCoordinator micro-tap guard (<0.3s rejection) verified")
+
+@MainActor
+func testErrorNotificationAndRecovery() async {
+    let mockRecorder = MockAudioRecorder(stubbedDuration: 1.0)
+    let mockEngine = MockFailingSTTEngine(errorMessage: "Simulated network failure")
+    let coordinator = DictationCoordinator(
+        recorder: mockRecorder,
+        activeEngine: mockEngine
+    )
+
+    var receivedErrorNotification: String?
+    coordinator.onErrorNotification = { message in
+        receivedErrorNotification = message
+    }
+
+    assert(coordinator.state == .idle, "Coordinator must start in .idle state")
+    coordinator.startDictation()
+    assert(coordinator.state == .recording, "Coordinator should transition to .recording")
+
+    coordinator.stopDictation()
+    assert(coordinator.state == .transcribing, "Coordinator should transition to .transcribing")
+
+    var waitCount = 0
+    while waitCount < 50 {
+        if case .error = coordinator.state {
+            break
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        waitCount += 1
+    }
+
+    guard case .error(let err) = coordinator.state else {
+        fatalError("Coordinator failed to enter .error state")
+    }
+    assert(err.contains("Simulated network failure"), "Error message mismatch: \(err)")
+    assert(receivedErrorNotification != nil, "onErrorNotification callback should have been fired")
+    assert(receivedErrorNotification?.contains("Simulated network failure") == true, "Notification callback received wrong message")
+
+    // Automatic recovery on next startDictation
+    coordinator.startDictation()
+    assert(coordinator.state == .recording, "startDictation must clear .error state and transition to .recording")
+
+    mockRecorder.stubbedDuration = 0.1
+    coordinator.stopDictation()
+    assert(coordinator.state == .idle, "Brief stop should return coordinator to .idle")
+}
+
+await testErrorNotificationAndRecovery()
+print("✔ DictationCoordinator error notification and recovery verified")
 
 print("All KansoCore tests passed successfully! 🎉")

@@ -73,6 +73,16 @@ public struct KansoDictateApp: App {
         let coordinatorInstance = DictationCoordinator(activeEngine: engine)
         _coordinator = StateObject(wrappedValue: coordinatorInstance)
 
+        coordinatorInstance.onErrorNotification = { message in
+            let alert = NSAlert()
+            alert.messageText = "Dictation Error"
+            alert.informativeText = message
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "OK")
+            NSApp.activate(ignoringOtherApps: true)
+            alert.runModal()
+        }
+
         // Setup Right Option Push-To-Talk
         eventTapManager.onKeyDown = { [weak coordinatorInstance] in
             Task { @MainActor in
