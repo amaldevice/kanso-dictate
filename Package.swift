@@ -8,7 +8,8 @@ let package = Package(
     ],
     products: [
         .library(name: "KansoCore", targets: ["KansoCore"]),
-        .executable(name: "KansoDictate", targets: ["KansoDictate"])
+        .executable(name: "KansoDictate", targets: ["KansoDictate"]),
+        .executable(name: "KansoCoreTests", targets: ["KansoCoreTests"])
     ],
     dependencies: [],
     targets: [
@@ -27,9 +28,13 @@ let package = Package(
                 .enableUpcomingFeature("StrictConcurrency")
             ]
         ),
-        .testTarget(
+        .executableTarget(
             name: "KansoCoreTests",
-            dependencies: ["KansoCore"]
+            dependencies: ["KansoCore"],
+            path: "Tests/KansoCoreTests",
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency")
+            ]
         )
     ]
 )
