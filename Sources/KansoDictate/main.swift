@@ -35,7 +35,38 @@ if CommandLine.arguments.contains("--test-mic") {
     } catch {
         print("❌ Audio recording failed: \(error.localizedDescription)")
     }
+} else if let keyIndex = CommandLine.arguments.firstIndex(of: "--test-remote"), keyIndex + 1 < CommandLine.arguments.count {
+    let apiKey = CommandLine.arguments[keyIndex + 1]
+    print("🌐 Kanso Dictate: Testing Remote STT with Groq / OpenAI...")
+    let recorder = AudioRecorder()
+    let config = OpenAICompatibleConfig(
+        baseURL: URL(string: "https://api.groq.com/openai/v1")!,
+        apiKey: apiKey,
+        model: "whisper-large-v3-turbo"
+    )
+    let engine = OpenAICompatibleSTTEngine(config: config)
+
+    Task {
+        do {
+            print("🎙️ Recording 3 seconds for transcription test...")
+            try recorder.startRecording()
+            try await Task.sleep(nanoseconds: 3_000_000_000)
+            let recording = try recorder.stopRecording()
+            print("⏳ Uploading \(recording.wavData.count) bytes to \(engine.displayName)...")
+            let result = try await engine.transcribe(audioData: recording.wavData, language: "en", prompt: nil)
+            print("✔ Transcription Succeeded! Result:")
+            print("  - Text: \"\(result.text)\"")
+            print("  - Duration: \(String(format: "%.2f", result.durationSeconds))s")
+            exit(0)
+        } catch {
+            print("❌ Remote transcription failed: \(error.localizedDescription)")
+            exit(1)
+        }
+    }
+    RunLoop.main.run()
 } else {
     print("Kanso Dictate v0.1.0 (Menu Bar Dictation Assistant)")
-    print("Run with '--test-mic' to test 3-second audio recording.")
+    print("Usage options:")
+    print("  swift run KansoDictate --test-mic")
+    print("  swift run KansoDictate --test-remote <GROQ_OR_OPENAI_API_KEY>")
 }
