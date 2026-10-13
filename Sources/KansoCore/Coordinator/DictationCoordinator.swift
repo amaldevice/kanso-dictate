@@ -13,9 +13,16 @@ public enum DictationState: Sendable, Equatable {
 /// Central coordinator driving audio recording, transcription, text injection, and persistence.
 @MainActor
 public final class DictationCoordinator: ObservableObject {
-    @Published public private(set) var state: DictationState = .idle
+    @Published public private(set) var state: DictationState = .idle {
+        didSet {
+            if case .error(let message) = state {
+                onErrorNotification?(message)
+            }
+        }
+    }
     @Published public private(set) var lastTranscribedText: String = ""
 
+    public var onErrorNotification: (@MainActor (String) -> Void)?
     public let recorder: AudioRecorder
     public let injector: TextInjector
     public let historyStore: HistoryStore
@@ -35,8 +42,16 @@ public final class DictationCoordinator: ObservableObject {
 
     /// Starts audio recording for dictation.
     public func startDictation() {
-        guard state == .idle || (ifCaseError(state)) else { return }
+        switch state {
+        case .idle, .error:
+            break
+        default:
+            return
+        }
 
+        if recorder.isRecording {
+            _ = try? recorder.stopRecording()
+        }
         do {
             try recorder.startRecording()
             state = .recording
@@ -90,8 +105,4 @@ public final class DictationCoordinator: ObservableObject {
         }
     }
 
-    private func ifCaseError(_ state: DictationState) -> Bool {
-        if case .error = state { return true }
-        return false
-    }
 }

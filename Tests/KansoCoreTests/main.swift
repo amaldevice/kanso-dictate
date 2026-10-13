@@ -218,4 +218,70 @@ assert(EventTapManager.Constants.rightOptionMask == 0x0020_0000, "Right Option m
 _ = EventTapManager.isAccessibilityTrusted(prompt: false)
 print("✔ EventTapManager constants and permission inspection verified")
 
+// Test 14: DictationCoordinator Error Notification & Automatic Recovery
+struct MockFailingSTTEngine: SpeechToTextEngine {
+    let identifier: String = "mock.failing"
+    let displayName: String = "Mock Failing Engine"
+    let isLocal: Bool = false
+    let errorMessage: String
+
+    init(errorMessage: String = "Simulated network failure") {
+        self.errorMessage = errorMessage
+    }
+
+    func transcribe(
+        audioData: Data,
+        language: String?,
+        prompt: String?
+    ) async throws -> TranscriptionResult {
+        throw STTError.networkError(errorMessage)
+    }
+}
+
+let mockEngine = MockFailingSTTEngine(errorMessage: "Simulated network failure")
+let coordinator = DictationCoordinator(activeEngine: mockEngine)
+
+var receivedErrorNotification: String?
+coordinator.onErrorNotification = { message in
+    receivedErrorNotification = message
+}
+
+assert(coordinator.state == .idle, "Coordinator must start in .idle state")
+
+coordinator.startDictation()
+assert(coordinator.state == .recording, "Coordinator should transition to .recording")
+// Inject 1.0s of samples so recorded duration exceeds 0.3s threshold
+coordinator.recorder.appendSamplesForTesting(Array(repeating: 0.1, count: 16_000))
+
+coordinator.stopDictation()
+assert(coordinator.state == .transcribing, "Coordinator should transition to .transcribing")
+
+// Wait for async Task to handle transcription failure
+var waitCount = 0
+while waitCount < 50 {
+    if case .error = coordinator.state {
+        break
+    }
+    try await Task.sleep(nanoseconds: 20_000_000)
+    waitCount += 1
+}
+
+guard case .error(let err) = coordinator.state else {
+    fatalError("Coordinator failed to enter .error state")
+}
+assert(err.contains("Simulated network failure"), "Error message mismatch: \(err)")
+assert(receivedErrorNotification != nil, "onErrorNotification callback should have been fired")
+assert(receivedErrorNotification?.contains("Simulated network failure") == true, "Notification callback received wrong message")
+print("✔ DictationCoordinator error notification callback verified")
+
+// Verify automatic recovery on next startDictation
+coordinator.startDictation()
+assert(coordinator.state == .recording, "startDictation must clear .error state and transition to .recording")
+
+// Brief tap aborts cleanly back to .idle
+coordinator.stopDictation()
+try await Task.sleep(nanoseconds: 50_000_000)
+assert(coordinator.state == .idle, "Brief stop should return coordinator to .idle")
+print("✔ DictationCoordinator automatic error recovery verified")
+
 print("All KansoCore tests passed successfully! 🎉")
