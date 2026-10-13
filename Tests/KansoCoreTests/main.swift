@@ -217,6 +217,85 @@ assert(EventTapManager.Constants.rightOptionKeyCode == 0x3D, "Right Option keyco
 assert(EventTapManager.Constants.rightOptionMask == 0x0020_0000, "Right Option mask must be 0x0020_0000")
 _ = EventTapManager.isAccessibilityTrusted(prompt: false)
 print("✔ EventTapManager constants and permission inspection verified")
+// Test 14: WhisperKitConfig Defaults & Initialization
+let defaultWKConfig = WhisperKitConfig()
+assert(defaultWKConfig.modelFolder == nil, "Default modelFolder should be nil")
+assert(defaultWKConfig.modelVariant == "openai_whisper-base", "Default variant should be openai_whisper-base")
+assert(defaultWKConfig.downloadBase.path.contains("Library/Application Support/KansoDictate/models"), "Default downloadBase should point to Application Support/KansoDictate/models")
+print("✔ WhisperKitConfig default properties verified")
+
+// Test 15: WhisperKitEngine Model Path Normalization
+let customModelFolder = URL(fileURLWithPath: "/Library/Application Support/KansoDictate/models/custom-model/")
+let customWKConfig = WhisperKitConfig(
+    modelFolder: customModelFolder,
+    modelVariant: "openai_whisper-small",
+    downloadBase: URL(fileURLWithPath: "/custom/cache/dir/")
+)
+let customWKEngine = WhisperKitEngine(config: customWKConfig)
+assert(customWKEngine.effectiveModelFolder.path == "/Library/Application Support/KansoDictate/models/custom-model", "Explicit modelFolder should be standardized without trailing slash")
+
+// Test derived hub cache path when modelFolder is nil
+let defaultWKEngine = WhisperKitEngine(config: defaultWKConfig)
+let expectedDerivedSuffix = "Library/Application Support/KansoDictate/models/models/argmaxinc/whisperkit-coreml/openai_whisper-base"
+assert(defaultWKEngine.effectiveModelFolder.path.hasSuffix(expectedDerivedSuffix), "Effective model folder should derive canonical hub path: \(defaultWKEngine.effectiveModelFolder.path)")
+
+// Test tilde expansion and path normalization
+let tildeConfig = WhisperKitConfig(
+    modelFolder: URL(fileURLWithPath: "~/models/whisper-test/"),
+    downloadBase: URL(fileURLWithPath: "~/cache/whisper-test/")
+)
+assert(!tildeConfig.effectiveModelFolder.path.hasPrefix("~"), "Tilde should be expanded in effectiveModelFolder")
+assert(!tildeConfig.downloadBase.path.hasPrefix("~"), "Tilde should be expanded in downloadBase")
+assert(!tildeConfig.effectiveModelFolder.path.hasSuffix("/"), "Trailing slashes should be removed in normalized path")
+print("✔ WhisperKitEngine model path normalization verified")
+
+// Test 16: WhisperKitEngine SpeechToTextEngine Protocol Conformance
+let engineAsSTT: any SpeechToTextEngine = defaultWKEngine
+assert(engineAsSTT.isLocal == true, "WhisperKitEngine must be local (isLocal == true)")
+assert(engineAsSTT.identifier == "whisperkit.openai_whisper-base", "Engine identifier mismatch: \(engineAsSTT.identifier)")
+assert(engineAsSTT.displayName == "Local Whisper (openai_whisper-base)", "Display name mismatch: \(engineAsSTT.displayName)")
+assert(customWKEngine.isLocal == true, "Custom engine must also be local")
+assert(customWKEngine.identifier == "whisperkit.openai_whisper-small")
+print("✔ WhisperKitEngine protocol conformance verified")
+
+// Test 17: AudioDataParser Sample Extraction & Empty Guard
+let testFloatSamples: [Float] = [0.5, -0.5, 0.25, -0.25]
+let encodedWAV = WAVWriter.createWAVData(from: testFloatSamples, sampleRate: 16_000, channels: 1)
+let decodedSamples = try AudioDataParser.extractFloatSamples(from: encodedWAV)
+assert(decodedSamples.count == testFloatSamples.count, "Sample count mismatch")
+for (orig, dec) in zip(testFloatSamples, decodedSamples) {
+    assert(abs(orig - dec) < 0.001, "Decoded sample \(dec) differs from original \(orig)")
+}
+
+// Raw PCM extraction
+var rawInt16Bytes = Data()
+var int16Val: Int16 = 16384 // approx 0.5
+rawInt16Bytes.append(Data(bytes: &int16Val, count: 2))
+let rawDecoded = try AudioDataParser.extractFloatSamples(from: rawInt16Bytes)
+assert(rawDecoded.count == 1)
+assert(abs(rawDecoded[0] - 0.5) < 0.001)
+
+do {
+    _ = try AudioDataParser.extractFloatSamples(from: Data())
+    assertionFailure("AudioDataParser should throw on empty data")
+} catch let err as STTError {
+    assert(err == .emptyAudioData)
+}
+print("✔ AudioDataParser sample extraction and empty audio guard verified")
+
+// Test 18: WhisperTranscriptionActor Uninitialized Invariant
+let isolatedActor = WhisperTranscriptionActor()
+let actorReady = await isolatedActor.isReady
+assert(!actorReady, "WhisperTranscriptionActor should not be ready prior to initialization")
+
+do {
+    _ = try await isolatedActor.transcribe(audioSamples: [0.1, 0.2])
+    assertionFailure("transcribe() should throw when uninitialized")
+} catch let transcriberError as WhisperTranscriberError {
+    assert(transcriberError == .notInitialized, "Expected .notInitialized error, got \(transcriberError)")
+    assert(transcriberError.localizedDescription.contains("not been initialized"))
+}
+print("✔ WhisperTranscriptionActor actor isolation and error invariants verified")
 
 // Test 14: DictationCoordinator Micro-Tap Guard & Flow
 final class MockAudioRecorder: AudioRecordingService, @unchecked Sendable {
