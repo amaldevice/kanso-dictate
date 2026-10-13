@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import AudioToolbox
 
 /// Observable state of the dictation pipeline.
 public enum DictationState: Sendable, Equatable {
@@ -16,13 +17,13 @@ public final class DictationCoordinator: ObservableObject {
     @Published public private(set) var state: DictationState = .idle
     @Published public private(set) var lastTranscribedText: String = ""
 
-    public let recorder: AudioRecorder
+    public let recorder: any AudioRecordingService
     public let injector: TextInjector
     public let historyStore: HistoryStore
     public var activeEngine: any SpeechToTextEngine
 
     public init(
-        recorder: AudioRecorder = AudioRecorder(),
+        recorder: any AudioRecordingService = AudioRecorder(),
         injector: TextInjector = TextInjector(),
         historyStore: HistoryStore = HistoryStore(),
         activeEngine: any SpeechToTextEngine
@@ -40,7 +41,7 @@ public final class DictationCoordinator: ObservableObject {
         do {
             try recorder.startRecording()
             state = .recording
-            NSSound.beep() // Subtle auditory feedback
+            playFeedbackSound(named: "Tink", fallbackID: 1103)
         } catch {
             state = .error("Failed to start recording: \(error.localizedDescription)")
         }
@@ -50,44 +51,55 @@ public final class DictationCoordinator: ObservableObject {
     public func stopDictation() {
         guard state == .recording else { return }
 
-        state = .transcribing
-        NSSound.beep()
-
-        Task {
-            do {
-                let recording = try recorder.stopRecording()
-                guard recording.durationSeconds >= 0.3 else {
-                    // Tap was too brief; abort without error
-                    state = .idle
-                    return
-                }
-
-                let result = try await activeEngine.transcribe(
-                    audioData: recording.wavData,
-                    language: nil,
-                    prompt: nil
-                )
-
-                lastTranscribedText = result.text
-
-                if !result.text.isEmpty {
-                    state = .inserting
-                    try await injector.inject(text: result.text)
-
-                    let record = HistoryRecord(
-                        text: result.text,
-                        durationSeconds: recording.durationSeconds,
-                        engineIdentifier: result.engineIdentifier,
-                        timestamp: Date()
-                    )
-                    historyStore.addRecord(record)
-                }
-
+        do {
+            let recording = try recorder.stopRecording()
+            guard recording.durationSeconds >= 0.3 else {
+                // Micro-tap guard: abort without error, alert, or STT invocation
                 state = .idle
-            } catch {
-                state = .error("Transcription/Injection failed: \(error.localizedDescription)")
+                return
             }
+
+            playFeedbackSound(named: "Pop", fallbackID: 1104)
+            state = .transcribing
+
+            Task {
+                do {
+                    let result = try await activeEngine.transcribe(
+                        audioData: recording.wavData,
+                        language: nil,
+                        prompt: nil
+                    )
+
+                    lastTranscribedText = result.text
+
+                    if !result.text.isEmpty {
+                        state = .inserting
+                        try await injector.inject(text: result.text)
+
+                        let record = HistoryRecord(
+                            text: result.text,
+                            durationSeconds: recording.durationSeconds,
+                            engineIdentifier: result.engineIdentifier,
+                            timestamp: Date()
+                        )
+                        historyStore.addRecord(record)
+                    }
+
+                    state = .idle
+                } catch {
+                    state = .error("Transcription/Injection failed: \(error.localizedDescription)")
+                }
+            }
+        } catch {
+            state = .error("Failed to stop recording: \(error.localizedDescription)")
         }
+    }
+
+    private func playFeedbackSound(named name: String, fallbackID: SystemSoundID) {
+        if let sound = NSSound(named: name), sound.play() {
+            return
+        }
+        AudioServicesPlaySystemSound(fallbackID)
     }
 
     private func ifCaseError(_ state: DictationState) -> Bool {

@@ -218,4 +218,107 @@ assert(EventTapManager.Constants.rightOptionMask == 0x0020_0000, "Right Option m
 _ = EventTapManager.isAccessibilityTrusted(prompt: false)
 print("✔ EventTapManager constants and permission inspection verified")
 
+// Test 14: DictationCoordinator Micro-Tap Guard & Flow
+final class MockAudioRecorder: AudioRecordingService, @unchecked Sendable {
+    var stubbedDuration: Double
+    var isRecording: Bool = false
+    var startRecordingCalled = false
+    var stopRecordingCalled = false
+
+    init(stubbedDuration: Double = 0.1) {
+        self.stubbedDuration = stubbedDuration
+    }
+
+    func startRecording() throws {
+        startRecordingCalled = true
+        isRecording = true
+    }
+
+    func stopRecording() throws -> AudioRecording {
+        stopRecordingCalled = true
+        isRecording = false
+        return AudioRecording(
+            wavData: Data([0x52, 0x49, 0x46, 0x46]),
+            samples: [0.0],
+            durationSeconds: stubbedDuration
+        )
+    }
+}
+
+final class MockSTTEngine: SpeechToTextEngine, @unchecked Sendable {
+    let identifier = "mock.stt"
+    let displayName = "Mock STT"
+    let isLocal = true
+
+    var transcribeCallCount = 0
+
+    func transcribe(
+        audioData: Data,
+        language: String?,
+        prompt: String?
+    ) async throws -> TranscriptionResult {
+        transcribeCallCount += 1
+        return TranscriptionResult(
+            text: "Mock transcript",
+            durationSeconds: 1.0,
+            engineIdentifier: identifier,
+            timestamp: Date()
+        )
+    }
+}
+
+@MainActor
+func testMicroTapGuard() async {
+    // Sub-test A: Micro-tap (< 0.3s) immediately resets to .idle without invoking STT or error
+    let mockRecorderA = MockAudioRecorder(stubbedDuration: 0.15)
+    let mockEngineA = MockSTTEngine()
+    let coordinatorA = DictationCoordinator(
+        recorder: mockRecorderA,
+        activeEngine: mockEngineA
+    )
+
+    assert(coordinatorA.state == .idle, "Initial state must be idle")
+    coordinatorA.startDictation()
+    assert(coordinatorA.state == .recording, "State must be recording after start")
+    assert(mockRecorderA.startRecordingCalled, "startRecording must be called")
+
+    coordinatorA.stopDictation()
+    assert(coordinatorA.state == .idle, "State must immediately reset to idle on micro-tap (<0.3s)")
+    assert(mockRecorderA.stopRecordingCalled, "stopRecording must be called")
+    assert(mockEngineA.transcribeCallCount == 0, "STT must NOT be invoked on micro-tap")
+
+    // Sub-test B: Boundary micro-tap (0.29s) must also reject
+    let mockRecorderB = MockAudioRecorder(stubbedDuration: 0.29)
+    let mockEngineB = MockSTTEngine()
+    let coordinatorB = DictationCoordinator(
+        recorder: mockRecorderB,
+        activeEngine: mockEngineB
+    )
+    coordinatorB.startDictation()
+    assert(coordinatorB.state == .recording)
+    coordinatorB.stopDictation()
+    assert(coordinatorB.state == .idle, "Boundary 0.29s tap must reset to idle")
+    assert(mockEngineB.transcribeCallCount == 0, "STT must NOT be invoked on 0.29s tap")
+
+    // Sub-test C: Valid recording (>= 0.3s) triggers transcription
+    let mockRecorderC = MockAudioRecorder(stubbedDuration: 0.5)
+    let mockEngineC = MockSTTEngine()
+    let coordinatorC = DictationCoordinator(
+        recorder: mockRecorderC,
+        activeEngine: mockEngineC
+    )
+    coordinatorC.startDictation()
+    assert(coordinatorC.state == .recording)
+    coordinatorC.stopDictation()
+    assert(coordinatorC.state == .transcribing, "State must transition to transcribing for valid duration")
+
+    try? await Task.sleep(nanoseconds: 100_000_000)
+    assert(mockEngineC.transcribeCallCount == 1, "STT must be invoked for recording >= 0.3s")
+    assert(coordinatorC.state == .idle, "State must return to idle after transcription & injection")
+    assert(coordinatorC.lastTranscribedText == "Mock transcript", "Transcribed text mismatch")
+}
+
+await testMicroTapGuard()
+print("✔ DictationCoordinator micro-tap guard (<0.3s rejection) verified")
+
 print("All KansoCore tests passed successfully! 🎉")
