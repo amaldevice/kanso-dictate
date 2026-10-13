@@ -297,7 +297,7 @@ do {
 }
 print("✔ WhisperTranscriptionActor actor isolation and error invariants verified")
 
-// Test 14: DictationCoordinator Micro-Tap Guard & Flow
+// Test 19: DictationCoordinator Micro-Tap Guard & Flow
 final class MockAudioRecorder: AudioRecordingService, @unchecked Sendable {
     var stubbedDuration: Double
     var isRecording: Bool = false
@@ -346,7 +346,7 @@ final class MockSTTEngine: SpeechToTextEngine, @unchecked Sendable {
     }
 }
 
-// Test 15: DictationCoordinator Error Notification & Automatic Recovery
+// Test 20: DictationCoordinator Error Notification & Automatic Recovery
 struct MockFailingSTTEngine: SpeechToTextEngine {
     let identifier: String = "mock.failing"
     let displayName: String = "Mock Failing Engine"
@@ -465,7 +465,7 @@ func testErrorNotificationAndRecovery() async {
 await testErrorNotificationAndRecovery()
 print("✔ DictationCoordinator error notification and recovery verified")
 
-// Test 16: DictationCoordinator Dynamic Engine Switching
+// Test 21: DictationCoordinator Dynamic Engine Switching
 final class MockLocalEngine: SpeechToTextEngine, @unchecked Sendable {
     let identifier = "mock.local.whisperkit"
     let displayName = "Mock Local Whisper"
@@ -589,9 +589,15 @@ func testDynamicEngineSwitching() async {
     // 4. Test configureEngineFromPreferences(defaults:) switching
     let suiteName = "test.dictation.switching.\(UUID().uuidString)"
     let testDefaults = UserDefaults(suiteName: suiteName)!
+    // Verify STTProviderMode enum
+    assert(STTProviderMode.allCases == [.remote, .local])
+    assert(STTProviderMode.remote.rawValue == "remote")
+    assert(STTProviderMode.local.rawValue == "local")
+    assert(STTProviderMode(rawValue: "remote") == .remote)
+    assert(STTProviderMode(rawValue: "local") == .local)
 
     // Test local configuration from preferences
-    testDefaults.set("local", forKey: "stt_provider_mode")
+    testDefaults.set(STTProviderMode.local.rawValue, forKey: "stt_provider_mode")
     testDefaults.set("openai_whisper-base", forKey: "whisperkit_model_variant")
     coordinator.configureEngineFromPreferences(defaults: testDefaults)
     assert(coordinator.activeEngine.identifier == "whisperkit.openai_whisper-base", "Configured engine should be WhisperKit base")
@@ -599,7 +605,7 @@ func testDynamicEngineSwitching() async {
     assert(coordinator.activeEngine.isLocal == true)
 
     // Test remote configuration from preferences
-    testDefaults.set("remote", forKey: "stt_provider_mode")
+    testDefaults.set(STTProviderMode.remote.rawValue, forKey: "stt_provider_mode")
     testDefaults.set("whisper-large-v3-turbo", forKey: "stt_model")
     coordinator.configureEngineFromPreferences(defaults: testDefaults)
     assert(coordinator.activeEngine.identifier == "remote.whisper-large-v3-turbo", "Configured engine should be remote whisper")
@@ -612,7 +618,7 @@ func testDynamicEngineSwitching() async {
 await testDynamicEngineSwitching()
 print("✔ DictationCoordinator dynamic engine switching verified")
 
-// Test 17: Exhaustive End-to-End Walking Skeleton Integration Test
+// Test 22: Exhaustive End-to-End Walking Skeleton Integration Test
 final class E2EMockAudioRecorder: AudioRecordingService, @unchecked Sendable {
     var stubbedDuration: Double
     var isRecording: Bool = false

@@ -141,10 +141,20 @@ public actor WhisperTranscriptionActor {
             textDecoderCompute: .cpuAndNeuralEngine
         )
 
+        let resolvedModelFolder: String? = {
+            if let customFolder = config.modelFolder?.path {
+                return customFolder
+            }
+            if FileManager.default.fileExists(atPath: config.effectiveModelFolder.path) {
+                return config.effectiveModelFolder.path
+            }
+            return nil
+        }()
+
         let kit = try await WhisperKit(
             model: config.modelVariant,
             downloadBase: config.downloadBase,
-            modelFolder: config.modelFolder?.path,
+            modelFolder: resolvedModelFolder,
             computeOptions: computeOptions,
             verbose: false,
             prewarm: true,
@@ -152,6 +162,11 @@ public actor WhisperTranscriptionActor {
             download: true
         )
         self.whisperKit = kit
+    }
+
+    /// Convenience initialization accepting config with labeled parameter `with`.
+    public func initialize(with config: WhisperKitConfig) async throws {
+        try await initialize(config: config)
     }
 
     /// Convenience initialization with model variant and download base directory.

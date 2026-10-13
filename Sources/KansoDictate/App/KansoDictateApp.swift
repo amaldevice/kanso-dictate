@@ -68,13 +68,8 @@ public struct KansoDictateApp: App {
         _coordinator = StateObject(wrappedValue: coordinatorInstance)
         _windowManager = StateObject(wrappedValue: windowManagerInstance)
         coordinatorInstance.onErrorNotification = { message in
-            let alert = NSAlert()
-            alert.messageText = "Dictation Error"
-            alert.informativeText = message
-            alert.alertStyle = .warning
-            alert.addButton(withTitle: "OK")
-            NSApp.activate(ignoringOtherApps: true)
-            alert.runModal()
+            // Non-modal error handling: log error without stealing focus from active application
+            NSLog("KansoDictate Error: %@", message)
         }
 
         // Setup Right Option Push-To-Talk
@@ -91,6 +86,21 @@ public struct KansoDictateApp: App {
         }
 
         eventTapManager.start()
+    }
+
+    private var menuBarTitle: String {
+        switch coordinator.state {
+        case .idle:
+            return "Kanso Dictate"
+        case .recording:
+            return "Kanso Dictate (Recording)"
+        case .transcribing:
+            return "Kanso Dictate (Transcribing)"
+        case .inserting:
+            return "Kanso Dictate (Inserting)"
+        case .error(let msg):
+            return "Kanso Dictate - Error: \(msg)"
+        }
     }
 
     private var menuBarIcon: String {
@@ -124,9 +134,10 @@ public struct KansoDictateApp: App {
     }
 
     public var body: some Scene {
-        MenuBarExtra("Kanso Dictate", systemImage: menuBarIcon) {
+        MenuBarExtra(menuBarTitle, systemImage: menuBarIcon) {
             Text(statusMessage)
                 .font(.headline)
+                .help(statusMessage)
 
             Text("Engine: \(coordinator.activeEngine.displayName)")
                 .font(.caption)

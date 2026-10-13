@@ -3,7 +3,7 @@ import KansoCore
 
 @MainActor
 public final class SettingsViewModel: ObservableObject {
-    @Published public var providerMode: String
+    @Published public var providerMode: STTProviderMode
     @Published public var baseURL: String
     @Published public var apiKey: String
     @Published public var modelName: String
@@ -15,7 +15,8 @@ public final class SettingsViewModel: ObservableObject {
 
     public init(onSettingsChanged: (@MainActor () -> Void)? = nil) {
         self.onSettingsChanged = onSettingsChanged
-        self.providerMode = UserDefaults.standard.string(forKey: "stt_provider_mode") ?? "remote"
+        let rawMode = UserDefaults.standard.string(forKey: "stt_provider_mode") ?? STTProviderMode.remote.rawValue
+        self.providerMode = STTProviderMode(rawValue: rawMode) ?? .remote
         self.baseURL = UserDefaults.standard.string(forKey: "stt_base_url") ?? "https://api.groq.com/openai/v1"
         self.apiKey = UserDefaults.standard.string(forKey: "stt_api_key") ?? ""
         self.modelName = UserDefaults.standard.string(forKey: "stt_model") ?? "whisper-large-v3-turbo"
@@ -25,7 +26,7 @@ public final class SettingsViewModel: ObservableObject {
     }
 
     public func save() {
-        UserDefaults.standard.set(providerMode, forKey: "stt_provider_mode")
+        UserDefaults.standard.set(providerMode.rawValue, forKey: "stt_provider_mode")
         UserDefaults.standard.set(baseURL, forKey: "stt_base_url")
         UserDefaults.standard.set(apiKey, forKey: "stt_api_key")
         UserDefaults.standard.set(modelName, forKey: "stt_model")
@@ -68,13 +69,13 @@ public struct SettingsView: View {
         Form {
             Section("Speech-to-Text Provider") {
                 Picker("Provider Mode:", selection: $viewModel.providerMode) {
-                    Text("Remote (OpenAI-Compatible)").tag("remote")
-                    Text("Local (WhisperKit CoreML)").tag("local")
+                    Text("Remote (OpenAI-Compatible)").tag(STTProviderMode.remote)
+                    Text("Local (WhisperKit CoreML)").tag(STTProviderMode.local)
                 }
                 .pickerStyle(.segmented)
                 .onChange(of: viewModel.providerMode) { viewModel.save() }
 
-                if viewModel.providerMode == "remote" {
+                if viewModel.providerMode == .remote {
                     TextField("Base URL:", text: $viewModel.baseURL)
                         .textFieldStyle(.roundedBorder)
                         .onChange(of: viewModel.baseURL) { viewModel.save() }

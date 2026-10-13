@@ -1,6 +1,5 @@
 import Foundation
 import AppKit
-import AudioToolbox
 
 /// Observable state of the dictation pipeline.
 public enum DictationState: Sendable, Equatable {
@@ -59,8 +58,10 @@ public final class DictationCoordinator: ObservableObject {
 
     /// Factory method building an engine according to user preferences in `UserDefaults`.
     nonisolated public static func makeEngineFromPreferences(defaults: UserDefaults = .standard) -> any SpeechToTextEngine {
-        let mode = defaults.string(forKey: "stt_provider_mode") ?? "remote"
-        if mode == "local" {
+        let rawMode = defaults.string(forKey: "stt_provider_mode") ?? STTProviderMode.remote.rawValue
+        let mode = STTProviderMode(rawValue: rawMode) ?? .remote
+        switch mode {
+        case .local:
             let variant = defaults.string(forKey: "whisperkit_model_variant") ?? "openai_whisper-base"
             let cachePath = defaults.string(forKey: "whisperkit_cache_directory")
             let downloadBase: URL
@@ -74,7 +75,7 @@ public final class DictationCoordinator: ObservableObject {
                 downloadBase: downloadBase
             )
             return WhisperKitEngine(config: config)
-        } else {
+        case .remote:
             let baseURLStr = defaults.string(forKey: "stt_base_url") ?? "https://api.groq.com/openai/v1"
             let apiKey = defaults.string(forKey: "stt_api_key")
             let model = defaults.string(forKey: "stt_model") ?? "whisper-large-v3-turbo"
@@ -107,7 +108,7 @@ public final class DictationCoordinator: ObservableObject {
         do {
             try recorder.startRecording()
             state = .recording
-            playFeedbackSound(named: "Tink", fallbackID: 1103)
+            playFeedbackSound(named: "Tink")
         } catch {
             state = .error("Failed to start recording: \(error.localizedDescription)")
         }
@@ -125,7 +126,7 @@ public final class DictationCoordinator: ObservableObject {
                 return
             }
 
-            playFeedbackSound(named: "Pop", fallbackID: 1104)
+            playFeedbackSound(named: "Pop")
             state = .transcribing
 
             Task {
@@ -161,15 +162,10 @@ public final class DictationCoordinator: ObservableObject {
         }
     }
 
-    private func playFeedbackSound(named name: String, fallbackID: SystemSoundID) {
-        if let sound = NSSound(named: name), sound.play() {
+    private func playFeedbackSound(named name: String) {
+        if let sound = NSSound(named: NSSound.Name(name)), sound.play() {
             return
         }
-        AudioServicesPlaySystemSound(fallbackID)
-    }
-
-    private func ifCaseError(_ state: DictationState) -> Bool {
-        if case .error = state { return true }
-        return false
+        NSSound.beep()
     }
 }
