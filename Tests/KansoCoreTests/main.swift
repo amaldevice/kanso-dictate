@@ -79,4 +79,64 @@ assert(testRecording.samples.count == 16_000)
 assert(testRecording.durationSeconds == 1.0)
 print("✔ AudioRecording container contract verified")
 
+// Test 6: OpenAICompatibleSTTEngine Endpoint Normalization
+let groqConfig = OpenAICompatibleConfig(
+    baseURL: URL(string: "https://api.groq.com/openai/v1")!,
+    apiKey: "gsk_test123",
+    model: "whisper-large-v3-turbo"
+)
+let groqEngine = OpenAICompatibleSTTEngine(config: groqConfig)
+assert(groqEngine.endpointURL.absoluteString == "https://api.groq.com/openai/v1/audio/transcriptions", "Endpoint mismatch")
+
+let trailingConfig = OpenAICompatibleConfig(
+    baseURL: URL(string: "https://api.groq.com/openai/v1/")!,
+    apiKey: "gsk_test123"
+)
+let trailingEngine = OpenAICompatibleSTTEngine(config: trailingConfig)
+assert(trailingEngine.endpointURL.absoluteString == "https://api.groq.com/openai/v1/audio/transcriptions", "Trailing slash mismatch")
+
+let fullConfig = OpenAICompatibleConfig(
+    baseURL: URL(string: "http://localhost:8080/v1/audio/transcriptions")!
+)
+let fullEngine = OpenAICompatibleSTTEngine(config: fullConfig)
+assert(fullEngine.endpointURL.absoluteString == "http://localhost:8080/v1/audio/transcriptions", "Full path mismatch")
+print("✔ OpenAICompatibleSTTEngine endpoint URL resolution verified")
+
+// Test 7: Multipart Request Building & Header Injection
+let mockAudio = Data([0x52, 0x49, 0x46, 0x46, 0x00, 0x01, 0x02, 0x03])
+let fixedBoundary = "StaticTestBoundary"
+let request = try groqEngine.buildRequest(
+    audioData: mockAudio,
+    language: "en",
+    prompt: "Test context",
+    boundary: fixedBoundary
+)
+
+assert(request.httpMethod == "POST", "Method must be POST")
+assert(request.value(forHTTPHeaderField: "Content-Type") == "multipart/form-data; boundary=\(fixedBoundary)", "Content-Type header mismatch")
+assert(request.value(forHTTPHeaderField: "Authorization") == "Bearer gsk_test123", "Authorization header mismatch")
+
+guard let httpBody = request.httpBody, let bodyString = String(data: httpBody, encoding: .utf8) else {
+    fatalError("Failed to decode HTTP body as UTF-8")
+}
+
+assert(bodyString.contains("name=\"model\"\r\n\r\nwhisper-large-v3-turbo"), "Missing model in body")
+assert(bodyString.contains("name=\"response_format\"\r\n\r\nverbose_json"), "Missing response_format in body")
+assert(bodyString.contains("name=\"language\"\r\n\r\nen"), "Missing language in body")
+assert(bodyString.contains("name=\"prompt\"\r\n\r\nTest context"), "Missing prompt in body")
+assert(bodyString.contains("filename=\"audio.wav\""), "Missing audio filename in body")
+assert(bodyString.contains("--\(fixedBoundary)--"), "Missing closing boundary")
+print("✔ OpenAICompatibleSTTEngine multipart body serialization verified")
+
+// Test 8: Empty Audio Guard
+do {
+    _ = try groqEngine.buildRequest(audioData: Data(), language: nil, prompt: nil)
+    assertionFailure("buildRequest must throw on empty audio")
+} catch let error as STTError {
+    assert(error == .emptyAudioData, "Expected .emptyAudioData, got \(error)")
+    print("✔ Empty audio data rejection verified")
+} catch {
+    assertionFailure("Unexpected error type: \(error)")
+}
+
 print("All KansoCore tests passed successfully! 🎉")
