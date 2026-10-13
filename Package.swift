@@ -11,11 +11,15 @@ let package = Package(
         .executable(name: "KansoDictate", targets: ["KansoDictate"]),
         .executable(name: "KansoCoreTests", targets: ["KansoCoreTests"])
     ],
-    dependencies: [],
+    dependencies: [
+        .package(url: "https://github.com/argmaxinc/argmax-oss-swift.git", from: "1.1.1")
+    ],
     targets: [
         .target(
             name: "KansoCore",
-            dependencies: [],
+            dependencies: [
+                .product(name: "WhisperKit", package: "argmax-oss-swift")
+            ],
             swiftSettings: [
                 .enableUpcomingFeature("StrictConcurrency")
             ]
