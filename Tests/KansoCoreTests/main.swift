@@ -160,13 +160,11 @@ assert(customPasteboard.string(forType: .string) == "Transcribed voice fragment"
 print("✔ TextInjector transient tagging verified")
 
 // Test 10: ChangeCount Concurrency Guard
-// If changeCount doesn't match expected, restore should fail and protect newer content
 let mismatchedRestore = TextInjector.restoreSnapshot(snapshot, to: customPasteboard, expectedChangeCount: expectedCount - 1)
 assert(!mismatchedRestore, "Restore should be skipped when changeCount mismatches")
 assert(customPasteboard.string(forType: .string) == "Transcribed voice fragment")
 print("✔ TextInjector changeCount guard verified")
 
-// Valid restore should succeed and restore original content
 let validRestore = TextInjector.restoreSnapshot(snapshot, to: customPasteboard, expectedChangeCount: expectedCount)
 assert(validRestore, "Restore should succeed when changeCount matches")
 assert(customPasteboard.string(forType: .string) == "User original clipboard text")
@@ -185,5 +183,39 @@ do {
     }
 }
 print("✔ TextInjector empty text guard verified")
+
+// Test 12: HistoryStore Persistence & Operations
+let tempHistoryURL = FileManager.default.temporaryDirectory.appendingPathComponent("test_history_\(UUID().uuidString).json")
+let historyStore = HistoryStore(fileURL: tempHistoryURL)
+assert(historyStore.records.isEmpty, "History store should initialize empty")
+
+let record1 = HistoryRecord(text: "Test dictation 1", durationSeconds: 2.1, engineIdentifier: "remote.test")
+let record2 = HistoryRecord(text: "Test dictation 2", durationSeconds: 4.5, engineIdentifier: "remote.test")
+
+historyStore.addRecord(record1)
+historyStore.addRecord(record2)
+
+assert(historyStore.records.count == 2, "Expected 2 records")
+assert(historyStore.records[0].text == "Test dictation 2", "Newest record must be first")
+assert(historyStore.records[1].text == "Test dictation 1", "Second record mismatch")
+
+// Verify re-loading from disk
+let reloadedStore = HistoryStore(fileURL: tempHistoryURL)
+assert(reloadedStore.records.count == 2, "Reloaded store must read persisted records")
+assert(reloadedStore.records[0].text == "Test dictation 2")
+
+// Verify clear
+historyStore.clear()
+assert(historyStore.records.isEmpty, "Cleared store must be empty")
+let clearedReloadedStore = HistoryStore(fileURL: tempHistoryURL)
+assert(clearedReloadedStore.records.isEmpty, "Persisted file should be cleared")
+try? FileManager.default.removeItem(at: tempHistoryURL)
+print("✔ HistoryStore add, persist, and clear verified")
+
+// Test 13: EventTapManager Constants & Accessibility Inspection
+assert(EventTapManager.Constants.rightOptionKeyCode == 0x3D, "Right Option keycode must be 0x3D")
+assert(EventTapManager.Constants.rightOptionMask == 0x0020_0000, "Right Option mask must be 0x0020_0000")
+_ = EventTapManager.isAccessibilityTrusted(prompt: false)
+print("✔ EventTapManager constants and permission inspection verified")
 
 print("All KansoCore tests passed successfully! 🎉")

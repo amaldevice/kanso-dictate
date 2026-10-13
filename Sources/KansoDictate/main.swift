@@ -86,9 +86,6 @@ if CommandLine.arguments.contains("--test-mic") {
     }
     RunLoop.main.run()
 } else {
-    print("Kanso Dictate v0.1.0 (Menu Bar Dictation Assistant)")
-    print("Usage options:")
-    print("  swift run KansoDictate --test-mic")
-    print("  swift run KansoDictate --test-remote <GROQ_OR_OPENAI_API_KEY>")
-    print("  swift run KansoDictate --test-inject \"Hello world from Kanso\"")
+    // Launch MenuBarExtra App
+    KansoDictateApp.main()
 }
