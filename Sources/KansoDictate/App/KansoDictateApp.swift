@@ -6,9 +6,11 @@ import KansoCore
 public final class WindowManager: ObservableObject {
     public var historyWindow: NSWindow?
     public var settingsWindow: NSWindow?
+    public weak var coordinator: DictationCoordinator?
 
-    public init() {}
-
+    public init(coordinator: DictationCoordinator? = nil) {
+        self.coordinator = coordinator
+    }
     public func openHistory(coordinator: DictationCoordinator) {
         if let window = historyWindow, window.isVisible {
             window.makeKeyAndOrderFront(nil)
@@ -31,7 +33,8 @@ public final class WindowManager: ObservableObject {
         self.historyWindow = window
     }
 
-    public func openSettings() {
+    public func openSettings(coordinator: DictationCoordinator? = nil) {
+        let activeCoordinator = coordinator ?? self.coordinator
         if let window = settingsWindow, window.isVisible {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -39,14 +42,14 @@ public final class WindowManager: ObservableObject {
         }
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 440),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
         window.center()
         window.title = "Kanso Dictate - Settings"
-        window.contentView = NSHostingView(rootView: SettingsView())
+        window.contentView = NSHostingView(rootView: SettingsView(coordinator: activeCoordinator))
         window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -60,19 +63,10 @@ public struct KansoDictateApp: App {
     private let eventTapManager = EventTapManager()
 
     public init() {
-        let baseURLStr = UserDefaults.standard.string(forKey: "stt_base_url") ?? "https://api.groq.com/openai/v1"
-        let apiKey = UserDefaults.standard.string(forKey: "stt_api_key")
-        let model = UserDefaults.standard.string(forKey: "stt_model") ?? "whisper-large-v3-turbo"
-
-        let config = OpenAICompatibleConfig(
-            baseURL: URL(string: baseURLStr) ?? URL(string: "https://api.groq.com/openai/v1")!,
-            apiKey: apiKey,
-            model: model
-        )
-        let engine = OpenAICompatibleSTTEngine(config: config)
-        let coordinatorInstance = DictationCoordinator(activeEngine: engine)
+        let coordinatorInstance = DictationCoordinator()
+        let windowManagerInstance = WindowManager(coordinator: coordinatorInstance)
         _coordinator = StateObject(wrappedValue: coordinatorInstance)
-
+        _windowManager = StateObject(wrappedValue: windowManagerInstance)
         coordinatorInstance.onErrorNotification = { message in
             let alert = NSAlert()
             alert.messageText = "Dictation Error"
@@ -134,6 +128,10 @@ public struct KansoDictateApp: App {
             Text(statusMessage)
                 .font(.headline)
 
+            Text("Engine: \(coordinator.activeEngine.displayName)")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
             Divider()
 
             Button("History...") {
@@ -142,7 +140,7 @@ public struct KansoDictateApp: App {
             .keyboardShortcut("h")
 
             Button("Settings...") {
-                windowManager.openSettings()
+                windowManager.openSettings(coordinator: coordinator)
             }
             .keyboardShortcut(",")
 
