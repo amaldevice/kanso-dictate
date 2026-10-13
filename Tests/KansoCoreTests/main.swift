@@ -465,4 +465,150 @@ func testErrorNotificationAndRecovery() async {
 await testErrorNotificationAndRecovery()
 print("✔ DictationCoordinator error notification and recovery verified")
 
+// Test 16: DictationCoordinator Dynamic Engine Switching
+final class MockLocalEngine: SpeechToTextEngine, @unchecked Sendable {
+    let identifier = "mock.local.whisperkit"
+    let displayName = "Mock Local Whisper"
+    let isLocal = true
+    var transcribeCallCount = 0
+
+    func transcribe(
+        audioData: Data,
+        language: String?,
+        prompt: String?
+    ) async throws -> TranscriptionResult {
+        transcribeCallCount += 1
+        return TranscriptionResult(
+            text: "Transcribed locally",
+            durationSeconds: 1.0,
+            engineIdentifier: identifier,
+            timestamp: Date()
+        )
+    }
+}
+
+final class MockRemoteEngine: SpeechToTextEngine, @unchecked Sendable {
+    let identifier = "mock.remote.openai"
+    let displayName = "Mock Remote OpenAI"
+    let isLocal = false
+    var transcribeCallCount = 0
+
+    func transcribe(
+        audioData: Data,
+        language: String?,
+        prompt: String?
+    ) async throws -> TranscriptionResult {
+        transcribeCallCount += 1
+        return TranscriptionResult(
+            text: "Transcribed remotely",
+            durationSeconds: 1.0,
+            engineIdentifier: identifier,
+            timestamp: Date()
+        )
+    }
+}
+
+@MainActor
+func testDynamicEngineSwitching() async {
+    let recorder = MockAudioRecorder(stubbedDuration: 1.0)
+    let localEngine = MockLocalEngine()
+    let remoteEngine = MockRemoteEngine()
+
+    let coordinator = DictationCoordinator(
+        recorder: recorder,
+        activeEngine: localEngine
+    )
+
+    // 1. Initial engine state
+    assert(coordinator.activeEngine.identifier == "mock.local.whisperkit", "Initial engine should be local")
+    assert(coordinator.activeEngine.displayName == "Mock Local Whisper", "Initial displayName mismatch")
+    assert(coordinator.activeEngine.isLocal == true, "Initial engine should be local")
+
+    // Dispatch dictation using local engine
+    coordinator.startDictation()
+    coordinator.stopDictation()
+
+    var waitCount = 0
+    while waitCount < 50 {
+        if coordinator.state == .idle && localEngine.transcribeCallCount == 1 {
+            break
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        waitCount += 1
+    }
+
+    assert(localEngine.transcribeCallCount == 1, "Local engine should have received transcription dispatch")
+    assert(remoteEngine.transcribeCallCount == 0, "Remote engine should not have been called")
+    assert(coordinator.lastTranscribedText == "Transcribed locally", "Transcript should match local engine output")
+
+    // 2. Switch to remote engine dynamically via setEngine
+    coordinator.setEngine(remoteEngine)
+    assert(coordinator.activeEngine.identifier == "mock.remote.openai", "Switched engine identifier should be remote")
+    assert(coordinator.activeEngine.displayName == "Mock Remote OpenAI", "Switched engine displayName mismatch")
+    assert(coordinator.activeEngine.isLocal == false, "Switched engine should not be local")
+
+    // Dispatch dictation using remote engine
+    coordinator.startDictation()
+    coordinator.stopDictation()
+
+    waitCount = 0
+    while waitCount < 50 {
+        if coordinator.state == .idle && remoteEngine.transcribeCallCount == 1 {
+            break
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        waitCount += 1
+    }
+
+    assert(remoteEngine.transcribeCallCount == 1, "Remote engine should now have received transcription dispatch")
+    assert(localEngine.transcribeCallCount == 1, "Local engine call count should not change")
+    assert(coordinator.lastTranscribedText == "Transcribed remotely", "Transcript should match remote engine output")
+
+    // 3. Switch back to local engine
+    coordinator.setEngine(localEngine)
+    assert(coordinator.activeEngine.identifier == "mock.local.whisperkit", "Switched back to local engine")
+    assert(coordinator.activeEngine.displayName == "Mock Local Whisper")
+    assert(coordinator.activeEngine.isLocal == true)
+
+    coordinator.startDictation()
+    coordinator.stopDictation()
+
+    waitCount = 0
+    while waitCount < 50 {
+        if coordinator.state == .idle && localEngine.transcribeCallCount == 2 {
+            break
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        waitCount += 1
+    }
+
+    assert(localEngine.transcribeCallCount == 2, "Local engine should receive second transcription dispatch")
+    assert(remoteEngine.transcribeCallCount == 1, "Remote engine call count should still be 1")
+    assert(coordinator.lastTranscribedText == "Transcribed locally")
+
+    // 4. Test configureEngineFromPreferences(defaults:) switching
+    let suiteName = "test.dictation.switching.\(UUID().uuidString)"
+    let testDefaults = UserDefaults(suiteName: suiteName)!
+
+    // Test local configuration from preferences
+    testDefaults.set("local", forKey: "stt_provider_mode")
+    testDefaults.set("openai_whisper-base", forKey: "whisperkit_model_variant")
+    coordinator.configureEngineFromPreferences(defaults: testDefaults)
+    assert(coordinator.activeEngine.identifier == "whisperkit.openai_whisper-base", "Configured engine should be WhisperKit base")
+    assert(coordinator.activeEngine.displayName == "Local Whisper (openai_whisper-base)")
+    assert(coordinator.activeEngine.isLocal == true)
+
+    // Test remote configuration from preferences
+    testDefaults.set("remote", forKey: "stt_provider_mode")
+    testDefaults.set("whisper-large-v3-turbo", forKey: "stt_model")
+    coordinator.configureEngineFromPreferences(defaults: testDefaults)
+    assert(coordinator.activeEngine.identifier == "remote.whisper-large-v3-turbo", "Configured engine should be remote whisper")
+    assert(coordinator.activeEngine.displayName == "Remote (whisper-large-v3-turbo)")
+    assert(coordinator.activeEngine.isLocal == false)
+
+    testDefaults.removePersistentDomain(forName: suiteName)
+}
+
+await testDynamicEngineSwitching()
+print("✔ DictationCoordinator dynamic engine switching verified")
 print("All KansoCore tests passed successfully! 🎉")

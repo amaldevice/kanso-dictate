@@ -27,7 +27,18 @@ public final class DictationCoordinator: ObservableObject {
     public let recorder: any AudioRecordingService
     public let injector: TextInjector
     public let historyStore: HistoryStore
-    public var activeEngine: any SpeechToTextEngine
+    @Published public var activeEngine: any SpeechToTextEngine
+
+    public init(
+        recorder: any AudioRecordingService = AudioRecorder(),
+        injector: TextInjector = TextInjector(),
+        historyStore: HistoryStore = HistoryStore()
+    ) {
+        self.recorder = recorder
+        self.injector = injector
+        self.historyStore = historyStore
+        self.activeEngine = Self.makeEngineFromPreferences()
+    }
 
     public init(
         recorder: any AudioRecordingService = AudioRecorder(),
@@ -39,6 +50,46 @@ public final class DictationCoordinator: ObservableObject {
         self.injector = injector
         self.historyStore = historyStore
         self.activeEngine = activeEngine
+    }
+
+    /// Sets or switches the active speech-to-text engine dynamically.
+    public func setEngine(_ newEngine: any SpeechToTextEngine) {
+        self.activeEngine = newEngine
+    }
+
+    /// Factory method building an engine according to user preferences in `UserDefaults`.
+    nonisolated public static func makeEngineFromPreferences(defaults: UserDefaults = .standard) -> any SpeechToTextEngine {
+        let mode = defaults.string(forKey: "stt_provider_mode") ?? "remote"
+        if mode == "local" {
+            let variant = defaults.string(forKey: "whisperkit_model_variant") ?? "openai_whisper-base"
+            let cachePath = defaults.string(forKey: "whisperkit_cache_directory")
+            let downloadBase: URL
+            if let cachePath = cachePath, !cachePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                downloadBase = URL(fileURLWithPath: cachePath)
+            } else {
+                downloadBase = WhisperKitConfig.defaultDownloadBase
+            }
+            let config = WhisperKitConfig(
+                modelVariant: variant,
+                downloadBase: downloadBase
+            )
+            return WhisperKitEngine(config: config)
+        } else {
+            let baseURLStr = defaults.string(forKey: "stt_base_url") ?? "https://api.groq.com/openai/v1"
+            let apiKey = defaults.string(forKey: "stt_api_key")
+            let model = defaults.string(forKey: "stt_model") ?? "whisper-large-v3-turbo"
+            let config = OpenAICompatibleConfig(
+                baseURL: URL(string: baseURLStr) ?? URL(string: "https://api.groq.com/openai/v1")!,
+                apiKey: (apiKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ? apiKey : nil,
+                model: model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "whisper-large-v3-turbo" : model
+            )
+            return OpenAICompatibleSTTEngine(config: config)
+        }
+    }
+
+    /// Configures the active engine based on preferences in `UserDefaults`.
+    public func configureEngineFromPreferences(defaults: UserDefaults = .standard) {
+        setEngine(Self.makeEngineFromPreferences(defaults: defaults))
     }
 
     /// Starts audio recording for dictation.
