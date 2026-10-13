@@ -1,7 +1,7 @@
 import Foundation
 import AppKit
+import Combine
 import KansoCore
-
 print("Running KansoCore test suite...")
 
 // Test 1: TranscriptionResult properties
@@ -611,4 +611,204 @@ func testDynamicEngineSwitching() async {
 
 await testDynamicEngineSwitching()
 print("✔ DictationCoordinator dynamic engine switching verified")
+
+// Test 17: Exhaustive End-to-End Walking Skeleton Integration Test
+final class E2EMockAudioRecorder: AudioRecordingService, @unchecked Sendable {
+    var stubbedDuration: Double
+    var isRecording: Bool = false
+    var startRecordingCalled = false
+    var stopRecordingCalled = false
+    let sampleData: Data
+
+    init(stubbedDuration: Double = 1.2) {
+        self.stubbedDuration = stubbedDuration
+        let sampleCount = Int(16_000 * stubbedDuration)
+        let samples: [Float] = Array(repeating: 0.1, count: sampleCount)
+        self.sampleData = WAVWriter.createWAVData(from: samples, sampleRate: 16_000, channels: 1)
+    }
+
+    func startRecording() throws {
+        startRecordingCalled = true
+        isRecording = true
+    }
+
+    func stopRecording() throws -> AudioRecording {
+        stopRecordingCalled = true
+        isRecording = false
+        let sampleCount = Int(16_000 * stubbedDuration)
+        return AudioRecording(
+            wavData: sampleData,
+            samples: Array(repeating: 0.1, count: sampleCount),
+            durationSeconds: stubbedDuration
+        )
+    }
+}
+
+final class E2EMockSTTEngine: SpeechToTextEngine, @unchecked Sendable {
+    let identifier = "e2e.mock.engine"
+    let displayName = "E2E Mock Engine"
+    let isLocal = true
+
+    var transcribeCallCount = 0
+    var receivedAudioData: Data?
+    let transcriptionText: String
+
+    init(transcriptionText: String = "Walking skeleton end-to-end integration transcription text") {
+        self.transcriptionText = transcriptionText
+    }
+
+    func transcribe(
+        audioData: Data,
+        language: String?,
+        prompt: String?
+    ) async throws -> TranscriptionResult {
+        transcribeCallCount += 1
+        receivedAudioData = audioData
+        return TranscriptionResult(
+            text: transcriptionText,
+            durationSeconds: 1.2,
+            engineIdentifier: identifier,
+            timestamp: Date()
+        )
+    }
+}
+
+@MainActor
+func testEndToEndWalkingSkeleton() async {
+    let testStartTime = Date()
+    let expectedText = "Walking skeleton end-to-end integration transcription text"
+    let recordingDuration = 1.2
+
+    // 1. Isolated custom pasteboard
+    let customPasteboard = NSPasteboard.withUniqueName()
+    customPasteboard.clearContents()
+    customPasteboard.setString("Prior clipboard content", forType: .string)
+
+    // 2. Temporary file-backed HistoryStore
+    let tempHistoryURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("test_e2e_history_\(UUID().uuidString).json")
+    defer {
+        try? FileManager.default.removeItem(at: tempHistoryURL)
+    }
+    let historyStore = HistoryStore(fileURL: tempHistoryURL)
+    assert(historyStore.records.isEmpty, "Initial history store must be empty")
+
+    // 3. Mock audio recorder & mock STT engine
+    let recorder = E2EMockAudioRecorder(stubbedDuration: recordingDuration)
+    let engine = E2EMockSTTEngine(transcriptionText: expectedText)
+    let injector = TextInjector(restoreDelayMs: 400, pasteboard: customPasteboard)
+
+    let coordinator = DictationCoordinator(
+        recorder: recorder,
+        injector: injector,
+        historyStore: historyStore,
+        activeEngine: engine
+    )
+
+    // 4. Simulated hotkey trigger wiring (EventTapManager Right Option Push-To-Talk)
+    let eventTapManager = EventTapManager()
+    eventTapManager.onKeyDown = { [weak coordinator] in
+        Task { @MainActor in
+            coordinator?.startDictation()
+        }
+    }
+    eventTapManager.onKeyUp = { [weak coordinator] in
+        Task { @MainActor in
+            coordinator?.stopDictation()
+        }
+    }
+
+    // 5. Track state progression (.idle -> .recording -> .transcribing -> .inserting -> .idle)
+    var observedStates: [DictationState] = []
+    var cancellables = Set<AnyCancellable>()
+    coordinator.$state
+        .sink { state in
+            observedStates.append(state)
+        }
+        .store(in: &cancellables)
+
+    assert(coordinator.state == .idle, "Initial coordinator state must be .idle")
+
+    // 6. Simulate hotkey press (Key Down)
+    eventTapManager.onKeyDown?()
+
+    // Wait for transition to .recording
+    var waitCount = 0
+    while waitCount < 50 && coordinator.state != .recording {
+        try? await Task.sleep(nanoseconds: 10_000_000)
+        waitCount += 1
+    }
+    assert(coordinator.state == .recording, "Coordinator must be in .recording state")
+    assert(recorder.startRecordingCalled, "AudioRecorder startRecording must have been called")
+    assert(recorder.isRecording, "AudioRecorder isRecording must be true")
+
+    // 7. Simulate hotkey release (Key Up)
+    eventTapManager.onKeyUp?()
+
+    // 8. Wait for pipeline completion: recording -> transcribing -> inserting -> idle
+    waitCount = 0
+    while waitCount < 100 {
+        if coordinator.state == .idle && !historyStore.records.isEmpty {
+            break
+        }
+        try? await Task.sleep(nanoseconds: 20_000_000)
+        waitCount += 1
+    }
+
+    // 9. Validate state progression
+    let expectedStates: [DictationState] = [.idle, .recording, .transcribing, .inserting, .idle]
+    assert(
+        observedStates == expectedStates,
+        "Observed state progression mismatch. Expected \(expectedStates), got \(observedStates)"
+    )
+    assert(coordinator.state == .idle, "Final coordinator state must be .idle")
+    assert(recorder.stopRecordingCalled, "AudioRecorder stopRecording must have been called")
+    assert(engine.transcribeCallCount == 1, "Mock STT engine transcribe must be called once")
+    assert(engine.receivedAudioData?.count == recorder.sampleData.count, "Transcribed audio data mismatch")
+    assert(coordinator.lastTranscribedText == expectedText, "Coordinator lastTranscribedText mismatch")
+
+    // 10. Validate text appeared on pasteboard and transient markers were applied
+    assert(
+        customPasteboard.string(forType: .string) == expectedText,
+        "Transcribed text must appear on isolated pasteboard"
+    )
+    let pasteboardTypes = customPasteboard.pasteboardItems?.first?.types.map(\.rawValue) ?? []
+    assert(
+        pasteboardTypes.contains("org.nspasteboard.TransientType"),
+        "Pasteboard must contain TransientType marker"
+    )
+    assert(
+        pasteboardTypes.contains("org.nspasteboard.AutoGeneratedType"),
+        "Pasteboard must contain AutoGeneratedType marker"
+    )
+
+    // 11. Validate persistent HistoryStore append with correct metadata
+    assert(historyStore.records.count == 1, "HistoryStore must contain exactly 1 record")
+    let record = historyStore.records[0]
+    assert(record.text == expectedText, "Record text mismatch: \(record.text)")
+    assert(record.durationSeconds == recordingDuration, "Record duration mismatch: \(record.durationSeconds)")
+    assert(record.engineIdentifier == "e2e.mock.engine", "Record engineIdentifier mismatch: \(record.engineIdentifier)")
+    assert(record.timestamp >= testStartTime, "Record timestamp must be >= testStartTime")
+    assert(record.timestamp <= Date(), "Record timestamp must be <= now")
+
+    // 12. Validate disk persistence: re-read from temporary JSON file
+    let reloadedStore = HistoryStore(fileURL: tempHistoryURL)
+    assert(reloadedStore.records.count == 1, "Reloaded HistoryStore must contain 1 persisted record")
+    let persistedRecord = reloadedStore.records[0]
+    assert(persistedRecord.id == record.id, "Persisted record ID mismatch")
+    assert(persistedRecord.text == expectedText, "Persisted record text mismatch")
+    assert(persistedRecord.durationSeconds == recordingDuration, "Persisted record duration mismatch")
+    assert(persistedRecord.engineIdentifier == "e2e.mock.engine", "Persisted record engine mismatch")
+    assert(persistedRecord.timestamp == record.timestamp, "Persisted record timestamp mismatch")
+
+    // 13. Validate clipboard snapshot restoration after restore delay
+    try? await Task.sleep(nanoseconds: 500_000_000)
+    assert(
+        customPasteboard.string(forType: .string) == "Prior clipboard content",
+        "Pasteboard must be restored to prior clipboard content after restore delay"
+    )
+}
+
+await testEndToEndWalkingSkeleton()
+print("✔ End-to-End Walking Skeleton integration test verified")
 print("All KansoCore tests passed successfully! 🎉")
