@@ -57,11 +57,18 @@ public final class WindowManager: ObservableObject {
     }
 }
 
+@MainActor
+public final class HotkeyStatus: ObservableObject {
+    @Published public var isActive = EventTapManager.isAccessibilityTrusted(prompt: false)
+    public init() {}
+    public func refresh() { isActive = EventTapManager.isAccessibilityTrusted(prompt: false) }
+}
+
 public struct KansoDictateApp: App {
     @StateObject private var coordinator: DictationCoordinator
     @StateObject private var windowManager = WindowManager()
     @StateObject private var hudController: FloatingHUDController
-    @State private var isHotkeyActive = EventTapManager.isAccessibilityTrusted(prompt: false)
+    @StateObject private var hotkeyStatus = HotkeyStatus()
     private let eventTapManager = EventTapManager()
 
     public init() {
@@ -147,7 +154,7 @@ public struct KansoDictateApp: App {
             Text("Engine: \(coordinator.activeEngine.displayName)")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            if !isHotkeyActive {
+            if !hotkeyStatus.isActive {
                 Text("⚠️ Option hotkey OFF — grant Accessibility in Settings")
                     .font(.caption)
                     .foregroundColor(.orange)
@@ -186,11 +193,11 @@ public struct KansoDictateApp: App {
         .onChange(of: coordinator.state) { _ in
             if coordinator.state == .idle {
                 eventTapManager.resyncModifierState()
-                isHotkeyActive = EventTapManager.isAccessibilityTrusted(prompt: false)
+                hotkeyStatus.refresh()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
-            isHotkeyActive = EventTapManager.isAccessibilityTrusted(prompt: false)
+            hotkeyStatus.refresh()
         }
     }
 }
