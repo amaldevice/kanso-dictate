@@ -131,6 +131,20 @@ public struct SettingsView: View {
                 .onChange(of: viewModel.providerMode) { viewModel.save() }
 
                 if viewModel.providerMode == .remote {
+                    Picker("Preset:", selection: Binding(
+                        get: { "custom" },
+                        set: { tag in
+                            if let preset = STTRemotePreset(rawValue: tag) {
+                                viewModel.applyPreset(preset)
+                            }
+                        }
+                    )) {
+                        Text("Custom").tag("custom")
+                        ForEach(STTRemotePreset.allCases, id: \.self) { preset in
+                            Text(preset.displayName).tag(preset.rawValue)
+                        }
+                    }
+
                     TextField("Base URL:", text: $viewModel.baseURL)
                         .textFieldStyle(.roundedBorder)
                         .onChange(of: viewModel.baseURL) { viewModel.save() }

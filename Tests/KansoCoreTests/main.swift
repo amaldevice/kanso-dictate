@@ -1081,6 +1081,9 @@ assert(dgQuery.contains("model=nova-3"), "Missing model param: \(dgQuery)")
 assert(dgQuery.contains("language=id"), "Missing language param: \(dgQuery)")
 assert(dgQuery.contains("smart_format=true"), "Missing smart_format param: \(dgQuery)")
 assert(dgQuery.contains("keywords=Kanso") && dgQuery.contains("keywords=Whisper"), "Prompt must map to keywords params: \(dgQuery)")
+assert(dgQuery.contains("topics=true"), "Prompt must enable topics bias: \(dgQuery)")
+assert(dgQuery.contains("custom_topic_mode=extended"), "Prompt must set extended custom_topic_mode: \(dgQuery)")
+assert(dgQuery.contains("custom_topic=Kanso") && dgQuery.contains("custom_topic=Whisper"), "Prompt must map to custom_topic terms: \(dgQuery)")
 assert(dgRequest.value(forHTTPHeaderField: "Authorization") == "Token dg-test-key", "Deepgram must use Token auth scheme")
 assert(dgRequest.value(forHTTPHeaderField: "Content-Type") == "audio/wav", "Deepgram Content-Type mismatch")
 assert(dgRequest.httpBody == deepgramAudio, "Deepgram body must be raw WAV bytes")
@@ -1088,6 +1091,8 @@ assert(dgRequest.httpBody == deepgramAudio, "Deepgram body must be raw WAV bytes
 let dgBare = try deepgramEngine.buildRequest(audioData: deepgramAudio, language: nil, prompt: nil)
 assert((dgBare.url!.query ?? "").contains("language=multi"), "Unset language must fall back to multi")
 assert(!((dgBare.url!.query ?? "").contains("keywords=")), "Empty prompt must omit keywords")
+assert(!((dgBare.url!.query ?? "").contains("custom_topic")), "Empty prompt must omit custom_topic bias")
+assert(!((dgBare.url!.query ?? "").contains("topics=")), "Empty prompt must omit topics bias")
 let dgEn = try deepgramEngine.buildRequest(audioData: deepgramAudio, language: "en", prompt: nil)
 assert((dgEn.url!.query ?? "").contains("language=en"), "English hint mismatch")
 print("✔ DeepgramSTTEngine request shape verified")
@@ -1408,7 +1413,7 @@ if ProcessInfo.processInfo.environment["KANSO_LIVE_CLOUDFLARE"] == "1" {
 } else {
     print("○ Live Cloudflare check skipped (set KANSO_LIVE_CLOUDFLARE=1 + CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_API_TOKEN to run)")
 }
-// Test 35: AssemblyAISTTEngine request shape (Bearer auth, upload + create + poll)
+// Test 35: AssemblyAISTTEngine request shape (raw-key auth, upload + create + poll)
 let assemblyaiConfig = AssemblyAISTTConfig(apiKey: "aai-test-key", model: "universal-2")
 let assemblyaiEngine = AssemblyAISTTEngine(config: assemblyaiConfig)
 assert(assemblyaiEngine.identifier == "assemblyai.universal-2", "AssemblyAI identifier mismatch: \(assemblyaiEngine.identifier)")
@@ -1419,13 +1424,13 @@ let aaiUpload = try assemblyaiEngine.buildUploadRequest(audioData: assemblyaiAud
 assert(aaiUpload.httpMethod == "POST", "Upload must be POST")
 assert(aaiUpload.url?.host == "api.assemblyai.com", "Upload host mismatch")
 assert(aaiUpload.url?.path == "/v1/upload", "Upload path mismatch: \(aaiUpload.url?.path ?? "")")
-assert(aaiUpload.value(forHTTPHeaderField: "Authorization") == "Bearer aai-test-key", "Upload must use Bearer auth")
+assert(aaiUpload.value(forHTTPHeaderField: "Authorization") == "aai-test-key", "Upload must use raw-key auth")
 assert(aaiUpload.value(forHTTPHeaderField: "Content-Type") == "application/octet-stream", "Upload Content-Type mismatch")
 assert(aaiUpload.httpBody == assemblyaiAudio, "Upload body must be raw WAV bytes")
 let aaiCreate = try assemblyaiEngine.buildCreateRequest(audioURL: "https://example.com/audio.wav", language: "id", prompt: "Kanso, Whisper")
 assert(aaiCreate.httpMethod == "POST", "Create must be POST")
 assert(aaiCreate.url?.path == "/v1/transcript", "Create path mismatch")
-assert(aaiCreate.value(forHTTPHeaderField: "Authorization") == "Bearer aai-test-key", "Create must use Bearer auth")
+assert(aaiCreate.value(forHTTPHeaderField: "Authorization") == "aai-test-key", "Create must use raw-key auth")
 let aaiBody = try JSONSerialization.jsonObject(with: aaiCreate.httpBody!) as! [String: Any]
 assert((aaiBody["audio_url"] as? String) == "https://example.com/audio.wav", "audio_url mismatch")
 assert((aaiBody["speech_model"] as? String) == "universal-2", "Model mismatch in body")
@@ -1438,7 +1443,7 @@ assert(aaiBareBody["word_boost"] == nil, "Empty prompt must be omitted")
 let aaiPoll = try assemblyaiEngine.buildPollRequest(transcriptID: "tr_123")
 assert(aaiPoll.httpMethod == "GET", "Poll must be GET")
 assert(aaiPoll.url?.path == "/v1/transcript/tr_123", "Poll path mismatch: \(aaiPoll.url?.path ?? "")")
-assert(aaiPoll.value(forHTTPHeaderField: "Authorization") == "Bearer aai-test-key", "Poll must use Bearer auth")
+assert(aaiPoll.value(forHTTPHeaderField: "Authorization") == "aai-test-key", "Poll must use raw-key auth")
 print("✔ AssemblyAISTTEngine request shape verified")
 
 // Test 36: AssemblyAI success parse incl. trim + duration fallback + poll timeout
@@ -1626,6 +1631,12 @@ func testAssemblyAIFactory() async {
 
 await testAssemblyAIFactory()
 print("✔ DictationCoordinator AssemblyAI factory mapping verified")
+// Code-review fix: AssemblyAI sends the key raw (primary: assemblyai.com/docs/api-reference
+// shows `Authorization: <YOUR_API_KEY>`; Bearer is only optionally accepted).
+let aaiSpaced = AssemblyAISTTEngine(config: AssemblyAISTTConfig(apiKey: "  aai-test-key  "))
+let aaiSpacedUpload = try aaiSpaced.buildUploadRequest(audioData: assemblyaiAudio)
+assert(aaiSpacedUpload.value(forHTTPHeaderField: "Authorization") == "aai-test-key", "AssemblyAI must send trimmed raw key, no Bearer prefix")
+print("✔ AssemblyAI raw-key auth verified")
 
 if ProcessInfo.processInfo.environment["KANSO_LIVE_ASSEMBLYAI"] == "1" {
     let liveKey = ProcessInfo.processInfo.environment["ASSEMBLYAI_API_KEY"] ?? ""
@@ -2229,4 +2240,20 @@ if ProcessInfo.processInfo.environment["KANSO_LIVE_ELEVENLABS"] == "1" {
 } else {
     print("○ Live ElevenLabs check skipped (set KANSO_LIVE_ELEVENLABS=1 + ELEVENLABS_API_KEY to run)")
 }
+// Code-review fix: factory passes trimmed key/model strings into configs.
+@MainActor
+func testTrimmedFactoryCredentials() async {
+    let suite = "test.trimmed.factory.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.set(STTProviderMode.deepgram.rawValue, forKey: "stt_provider_mode")
+    defaults.set("  dg-spaced-key  ", forKey: "deepgram_api_key")
+    defaults.set("  nova-3  ", forKey: "deepgram_model")
+    let built = DictationCoordinator.makeEngineFromPreferences(defaults: defaults) as! DeepgramSTTEngine
+    assert(built.config.apiKey == "dg-spaced-key", "Factory must pass trimmed key, got [\(built.config.apiKey ?? "nil")]")
+    assert(built.config.model == "nova-3", "Factory must pass trimmed model, got [\(built.config.model)]")
+    defaults.removePersistentDomain(forName: suite)
+}
+
+await testTrimmedFactoryCredentials()
+print("✔ DictationCoordinator trimmed credentials verified")
 print("All KansoCore tests passed successfully! 🎉")

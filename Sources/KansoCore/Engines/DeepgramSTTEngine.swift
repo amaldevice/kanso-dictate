@@ -85,6 +85,9 @@ public final class DeepgramSTTEngine: SpeechToTextEngine, @unchecked Sendable {
         ]
         if let terms = Self.keywords(from: prompt) {
             items += terms.map { URLQueryItem(name: "keywords", value: $0) }
+            items.append(URLQueryItem(name: "topics", value: "true"))
+            items.append(URLQueryItem(name: "custom_topic_mode", value: "extended"))
+            items += terms.map { URLQueryItem(name: "custom_topic", value: $0) }
         }
         components.queryItems = items
         var request = URLRequest(url: components.url!)

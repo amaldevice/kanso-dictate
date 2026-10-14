@@ -67,7 +67,7 @@ public final class AssemblyAISTTEngine: SpeechToTextEngine, @unchecked Sendable 
         var request = URLRequest(url: Self.baseUploadURL)
         request.httpMethod = "POST"
         request.timeoutInterval = config.timeoutInterval
-        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        request.setValue(key, forHTTPHeaderField: "Authorization")
         request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
         request.httpBody = audioData
         return request
@@ -84,7 +84,7 @@ public final class AssemblyAISTTEngine: SpeechToTextEngine, @unchecked Sendable 
         var request = URLRequest(url: Self.baseTranscriptURL)
         request.httpMethod = "POST"
         request.timeoutInterval = config.timeoutInterval
-        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        request.setValue(key, forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         var body: [String: Any] = ["audio_url": audioURL, "speech_model": config.model]
         if let language, !language.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { body["language_code"] = language }
@@ -101,7 +101,7 @@ public final class AssemblyAISTTEngine: SpeechToTextEngine, @unchecked Sendable 
         var request = URLRequest(url: Self.baseTranscriptURL.appendingPathComponent(transcriptID))
         request.httpMethod = "GET"
         request.timeoutInterval = config.timeoutInterval
-        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        request.setValue(key, forHTTPHeaderField: "Authorization")
         return request
     }
 
