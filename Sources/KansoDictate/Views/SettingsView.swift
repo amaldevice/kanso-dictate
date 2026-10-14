@@ -1,5 +1,7 @@
 import SwiftUI
 import KansoCore
+import AVFoundation
+import AppKit
 
 @MainActor
 public final class SettingsViewModel: ObservableObject {
@@ -24,9 +26,8 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var elevenlabsApiKey: String
     @Published public var elevenlabsModel: String
     @Published public var isAccessibilityGranted: Bool
-
+    @Published public var isMicrophoneGranted: Bool
     public var onSettingsChanged: (@MainActor () -> Void)?
-
     public init(onSettingsChanged: (@MainActor () -> Void)? = nil) {
         self.onSettingsChanged = onSettingsChanged
         let rawMode = UserDefaults.standard.string(forKey: "stt_provider_mode") ?? STTProviderMode.remote.rawValue
@@ -51,6 +52,7 @@ public final class SettingsViewModel: ObservableObject {
         self.elevenlabsApiKey = UserDefaults.standard.string(forKey: "elevenlabs_api_key") ?? ""
         self.elevenlabsModel = UserDefaults.standard.string(forKey: "elevenlabs_model") ?? ElevenLabsSTTConfig.defaultModel
         self.isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
+        self.isMicrophoneGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
     }
 
     public func save() {
@@ -85,11 +87,21 @@ public final class SettingsViewModel: ObservableObject {
 
     public func refreshPermissions() {
         isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
+        isMicrophoneGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
     }
 
     public func requestPermissions() {
         _ = EventTapManager.isAccessibilityTrusted(prompt: true)
+        AVCaptureDevice.requestAccess(for: .audio) { _ in
+            Task { @MainActor in self.refreshPermissions() }
+        }
         refreshPermissions()
+    }
+
+    public func openSystemSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
     }
 }
 
@@ -295,21 +307,45 @@ public struct SettingsView: View {
             Section("Permissions") {
                 HStack {
                     Label(
-                        "Accessibility Privileges",
+                        "Accessibility — \(viewModel.isAccessibilityGranted ? "Granted" : "Not Granted")",
                         systemImage: viewModel.isAccessibilityGranted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
                     )
                     .foregroundColor(viewModel.isAccessibilityGranted ? .green : .orange)
 
                     Spacer()
 
-                    if !viewModel.isAccessibilityGranted {
+                    if viewModel.isAccessibilityGranted {
+                        Button("Open System Settings") {
+                            viewModel.openSystemSettings()
+                        }
+                    } else {
                         Button("Grant Access") {
                             viewModel.requestPermissions()
                         }
                     }
                 }
 
-                Text("Required for Push-To-Talk key interception and synthetic paste into active apps.")
+                Text(viewModel.isAccessibilityGranted ? "Granted — Option hotkey active. If keys stop responding, reopen Settings to resync." : "Required for Push-To-Talk key interception and synthetic paste into active apps. After toggling ON, return here to resync.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                HStack {
+                    Label(
+                        "Microphone — \(viewModel.isMicrophoneGranted ? "Granted" : "Not Granted")",
+                        systemImage: viewModel.isMicrophoneGranted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                    )
+                    .foregroundColor(viewModel.isMicrophoneGranted ? .green : .orange)
+
+                    Spacer()
+
+                    if !viewModel.isMicrophoneGranted {
+                        Button("Grant Access") {
+                            viewModel.requestPermissions()
+                        }
+                    }
+                }
+
+                Text(viewModel.isMicrophoneGranted ? "Granted — audio capture ready." : "Required for audio capture. macOS prompts once; if denied, enable in System Settings → Privacy → Microphone.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }

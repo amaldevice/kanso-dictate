@@ -74,10 +74,8 @@ public struct KansoDictateApp: App {
             NSLog("KansoDictate Error: %@", message)
         }
 
-        // Prompt for Accessibility on startup so macOS shows the System Settings authorization dialog
-        if !EventTapManager.isAccessibilityTrusted(prompt: true) {
-            NSLog("KansoDictate: Requesting Accessibility permission...")
-        }
+        // First-run: request mic + Accessibility together so Option hotkey works immediately after grant.
+        PermissionOnboarding.requestIfNeeded()
 
         // Setup Option Push-To-Talk
         eventTapManager.onKeyDown = { [weak coordinatorInstance] in
@@ -149,6 +147,12 @@ public struct KansoDictateApp: App {
                 .font(.caption)
                 .foregroundColor(.secondary)
 
+            if !EventTapManager.isAccessibilityTrusted(prompt: false) {
+                Text("⚠️ Option hotkey OFF — grant Accessibility in Settings")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+            }
+
             Divider()
             if coordinator.state == .recording {
                 Button("Stop Dictation & Transcribe") {
@@ -156,6 +160,7 @@ public struct KansoDictateApp: App {
                 }
             } else {
                 Button("Start Dictation (or Hold ⌥)") {
+                    eventTapManager.resyncModifierState()
                     coordinator.startDictation()
                 }
             }
@@ -177,6 +182,11 @@ public struct KansoDictateApp: App {
                 NSApplication.shared.terminate(nil)
             }
             .keyboardShortcut("q")
+        }
+        .onChange(of: coordinator.state) { _ in
+            if coordinator.state == .idle {
+                eventTapManager.resyncModifierState()
+            }
         }
     }
 }

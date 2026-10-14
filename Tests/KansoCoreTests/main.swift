@@ -957,6 +957,23 @@ func testGeminiErrors() async {
     await checkStatus(403, matches: "API key")
     await checkStatus(429, matches: "quota")
     await checkStatus(500, matches: "unavailable")
+    await checkStatus(503, matches: "sibuk")
+    do {
+        StubURLProtocol.requestCount = 0
+        var attempts = 0
+        StubURLProtocol.requestHandler = { request in
+            attempts += 1
+            if attempts < 3 {
+                return (geminiHTTPResponse(url: request.url!, status: 503), Data("{\"error\":{\"message\":\"overloaded\"}}".utf8))
+            }
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"retry ok\"}]}}]}".utf8))
+        }
+        let retryRes = try await engine.transcribe(audioData: geminiAudio, language: nil, prompt: nil)
+        assert(retryRes.text == "retry ok", "503 retry must eventually succeed")
+        assert(StubURLProtocol.requestCount == 3, "503 must retry twice before success")
+    } catch {
+        assert(false, "503 retry must not throw: \(error)")
+    }
     // Network failure
     StubURLProtocol.requestHandler = { _ in throw URLError(.notConnectedToInternet) }
     do {

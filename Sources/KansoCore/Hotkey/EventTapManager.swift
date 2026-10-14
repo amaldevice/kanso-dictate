@@ -95,6 +95,21 @@ public final class EventTapManager: @unchecked Sendable {
         isKeyPressed = false
     }
 
+    /// Re-reads live modifier state; drops a stuck KeyDown when Option was released while tap was disabled.
+    public func resyncModifierState() {
+        let flags = CGEventSource.flagsState(.combinedSessionState).rawValue
+        let optionDown = (flags & Constants.alternateMask) != 0
+        lock.lock()
+        let wasDown = isKeyPressed
+        if wasDown, !optionDown {
+            isKeyPressed = false
+        }
+        lock.unlock()
+        if wasDown, !optionDown {
+            onKeyUp?()
+        }
+    }
+
     private func scheduleAccessibilityRetry() {
         guard retryTimer == nil else { return }
         DispatchQueue.main.async { [weak self] in
@@ -113,11 +128,10 @@ public final class EventTapManager: @unchecked Sendable {
         type: CGEventType,
         event: CGEvent
     ) -> Unmanaged<CGEvent>? {
-        if type == .tapDisabledByTimeout, let tap = eventTap {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput, let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: true)
             return Unmanaged.passUnretained(event)
         }
-
         guard type == .flagsChanged else {
             return Unmanaged.passUnretained(event)
         }
