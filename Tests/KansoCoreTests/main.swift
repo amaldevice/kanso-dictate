@@ -590,7 +590,7 @@ func testDynamicEngineSwitching() async {
     let suiteName = "test.dictation.switching.\(UUID().uuidString)"
     let testDefaults = UserDefaults(suiteName: suiteName)!
     // Verify STTProviderMode enum
-    assert(STTProviderMode.allCases == [.remote, .local, .gemini, .deepgram])
+    assert(STTProviderMode.allCases == [.remote, .local, .gemini, .deepgram, .cloudflare])
     assert(STTProviderMode.remote.rawValue == "remote")
     assert(STTProviderMode.local.rawValue == "local")
     assert(STTProviderMode(rawValue: "remote") == .remote)
@@ -1235,5 +1235,177 @@ if ProcessInfo.processInfo.environment["KANSO_LIVE_DEEPGRAM"] == "1" {
     print("✔ Live Deepgram check: [\(liveResult.text)]")
 } else {
     print("○ Live Deepgram check skipped (set KANSO_LIVE_DEEPGRAM=1 + DEEPGRAM_API_KEY to run)")
+}
+// Test 31: CloudflareSTTEngine request shape (Bearer auth, base64 JSON body, account-scoped URL)
+let cloudflareConfig = CloudflareSTTConfig(accountID: "test-acct-id", apiToken: "cf-test-token")
+let cloudflareEngine = CloudflareSTTEngine(config: cloudflareConfig)
+assert(cloudflareEngine.identifier == "cloudflare.whisper-large-v3-turbo", "Cloudflare identifier mismatch: \(cloudflareEngine.identifier)")
+assert(cloudflareEngine.isLocal == false, "Cloudflare must be remote (isLocal == false)")
+let cloudflareAudio = Data([0x52, 0x49, 0x46, 0x46, 0x00, 0x01, 0x02, 0x03])
+let cfRequest = try cloudflareEngine.buildRequest(audioData: cloudflareAudio, language: "id", prompt: "Kanso, Whisper")
+assert(cfRequest.httpMethod == "POST", "Cloudflare must be POST")
+let cfURL = cfRequest.url!
+assert(cfURL.host == "api.cloudflare.com", "Cloudflare host mismatch")
+assert(cfURL.path == "/client/v4/accounts/test-acct-id/ai/run/@cf/openai/whisper-large-v3-turbo", "Cloudflare path mismatch: \(cfURL.path)")
+assert(cfRequest.value(forHTTPHeaderField: "Authorization") == "Bearer cf-test-token", "Cloudflare must use Bearer auth scheme")
+assert(cfRequest.value(forHTTPHeaderField: "Content-Type") == "application/json", "Cloudflare Content-Type mismatch")
+let cfBody = try JSONSerialization.jsonObject(with: cfRequest.httpBody!) as! [String: Any]
+assert((cfBody["audio"] as? String) == cloudflareAudio.base64EncodedString(), "Audio must be base64 WAV bytes")
+assert((cfBody["task"] as? String) == "transcribe", "Task must be transcribe")
+assert((cfBody["language"] as? String) == "id", "Language hint mismatch")
+assert((cfBody["initial_prompt"] as? String) == "Kanso, Whisper", "Prompt must map to initial_prompt")
+// Unset language/prompt omits optional keys but keeps audio + task
+let cfBare = try cloudflareEngine.buildRequest(audioData: cloudflareAudio, language: nil, prompt: nil)
+let cfBareBody = try JSONSerialization.jsonObject(with: cfBare.httpBody!) as! [String: Any]
+assert(cfBareBody["audio"] != nil, "Bare request must keep audio")
+assert((cfBareBody["task"] as? String) == "transcribe", "Bare request must keep task")
+assert(cfBareBody["language"] == nil, "Unset language must be omitted")
+assert(cfBareBody["initial_prompt"] == nil, "Empty prompt must be omitted")
+print("✔ CloudflareSTTEngine request shape verified")
+
+// Test 32: Cloudflare success parse incl. trim + duration fallback
+@MainActor
+func testCloudflareSuccess() async throws {
+    let session = makeGeminiStubSession()
+    let engine = CloudflareSTTEngine(config: CloudflareSTTConfig(accountID: "test-acct-id", apiToken: "cf-test-token"), session: session)
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        assert(request.value(forHTTPHeaderField: "Authorization") == "Bearer cf-test-token", "Stub must see Bearer auth")
+        return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"result\":{\"text\":\"  halo dunia  \",\"duration\":2.5},\"success\":true}".utf8))
+    }
+    let res = try await engine.transcribe(audioData: cloudflareAudio, language: "id", prompt: nil)
+    assert(res.text == "halo dunia", "Trim mismatch: [\(res.text)]")
+    assert(abs(res.durationSeconds - 2.5) < 0.001, "Duration mismatch")
+    assert(res.engineIdentifier == "cloudflare.whisper-large-v3-turbo", "Engine badge mismatch")
+    assert(StubURLProtocol.requestCount == 1, "Must make exactly one run call")
+    // Duration fallback when server omits it
+    StubURLProtocol.requestHandler = { request in
+        (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"result\":{\"text\":\"hello\"},\"success\":true}".utf8))
+    }
+    let res2 = try await engine.transcribe(audioData: cloudflareAudio, language: "en", prompt: nil)
+    assert(res2.text == "hello", "Fallback text mismatch")
+    assert(res2.durationSeconds >= 0, "Fallback duration must be measured")
+}
+
+try await testCloudflareSuccess()
+print("✔ CloudflareSTTEngine success parse verified")
+
+// Test 33: Cloudflare error taxonomy (400/401/403/429/5xx/network/empty-audio)
+@MainActor
+func testCloudflareErrors() async {
+    let session = makeGeminiStubSession()
+    let engine = CloudflareSTTEngine(config: CloudflareSTTConfig(accountID: "test-acct-id", apiToken: "cf-test-token"), session: session)
+    func checkStatus(_ status: Int, matches: String) async {
+        StubURLProtocol.requestHandler = { request in
+            (geminiHTTPResponse(url: request.url!, status: status), Data("{\"success\":false,\"errors\":[{\"message\":\"server says no\"}]}".utf8))
+        }
+        do {
+            _ = try await engine.transcribe(audioData: cloudflareAudio, language: nil, prompt: nil)
+            assert(false, "Expected httpError")
+        } catch let err as STTError {
+            if case .httpError(let code, let msg) = err {
+                assert(code == status, "Status mismatch")
+                assert(msg.lowercased().contains(matches.lowercased()), "Error message must name failure class")
+            } else {
+                assert(false, "Wrong STTError case")
+            }
+        } catch {
+            assert(false, "Unexpected error type")
+        }
+    }
+    await checkStatus(400, matches: "Invalid")
+    await checkStatus(401, matches: "API token")
+    await checkStatus(403, matches: "API token")
+    await checkStatus(429, matches: "quota")
+    await checkStatus(500, matches: "unavailable")
+    // Network failure
+    StubURLProtocol.requestHandler = { _ in throw URLError(.notConnectedToInternet) }
+    do {
+        _ = try await engine.transcribe(audioData: cloudflareAudio, language: nil, prompt: nil)
+        assert(false, "Expected networkError")
+    } catch let err as STTError {
+        if case .networkError = err {
+        } else {
+            assert(false, "Expected networkError case")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    // Empty audio makes no network call
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        (geminiHTTPResponse(url: request.url!, status: 200), Data())
+    }
+    do {
+        _ = try await engine.transcribe(audioData: Data(), language: nil, prompt: nil)
+        assert(false, "Expected emptyAudioData")
+    } catch let err as STTError {
+        assert(err == .emptyAudioData, "Expected emptyAudioData")
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    assert(StubURLProtocol.requestCount == 0, "Empty audio must make no network call")
+    // Missing account/token pair surfaces distinct auth errors
+    let keyless = CloudflareSTTEngine(config: CloudflareSTTConfig(accountID: nil, apiToken: nil), session: session)
+    do {
+        _ = try await keyless.transcribe(audioData: cloudflareAudio, language: nil, prompt: nil)
+        assert(false, "Expected missing-credential auth error")
+    } catch let err as STTError {
+        if case .httpError(let code, _) = err {
+            assert(code == 401, "Missing credentials must be 401")
+        } else {
+            assert(false, "Wrong error for missing credentials")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+}
+
+await testCloudflareErrors()
+print("✔ CloudflareSTTEngine error taxonomy verified")
+
+// Test 34: Coordinator factory maps Cloudflare mode with isolated account+token pair
+@MainActor
+func testCloudflareFactory() async {
+    let suite = "test.cloudflare.factory.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.set(STTProviderMode.cloudflare.rawValue, forKey: "stt_provider_mode")
+    defaults.set("cf-acct-123", forKey: "cloudflare_account_id")
+    defaults.set("cf-token-secret", forKey: "cloudflare_api_token")
+    defaults.set("gsk-groq-secret", forKey: "stt_api_key")
+    defaults.set("AIza-gemini-secret", forKey: "gemini_api_key")
+    defaults.set("dg-secret", forKey: "deepgram_api_key")
+    let built = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(built.identifier == "cloudflare.whisper-large-v3-turbo", "Factory identifier mismatch: \(built.identifier)")
+    assert(built.isLocal == false, "Factory Cloudflare must be remote")
+    let cfBuilt = built as! CloudflareSTTEngine
+    assert(cfBuilt.config.accountID == "cf-acct-123", "Factory must use isolated cloudflare account ID")
+    assert(cfBuilt.config.apiToken == "cf-token-secret", "Factory must use isolated cloudflare token")
+    // Existing modes unchanged
+    defaults.set(STTProviderMode.remote.rawValue, forKey: "stt_provider_mode")
+    let remote = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(remote.identifier.hasPrefix("remote."), "Remote factory broke: \(remote.identifier)")
+    defaults.set(STTProviderMode.gemini.rawValue, forKey: "stt_provider_mode")
+    let gemini = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(gemini.identifier.hasPrefix("gemini."), "Gemini factory broke: \(gemini.identifier)")
+    defaults.set(STTProviderMode.deepgram.rawValue, forKey: "stt_provider_mode")
+    let dg = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(dg.identifier.hasPrefix("deepgram."), "Deepgram factory broke: \(dg.identifier)")
+    defaults.removePersistentDomain(forName: suite)
+}
+
+await testCloudflareFactory()
+print("✔ DictationCoordinator Cloudflare factory mapping verified")
+
+if ProcessInfo.processInfo.environment["KANSO_LIVE_CLOUDFLARE"] == "1" {
+    let liveAccount = ProcessInfo.processInfo.environment["CLOUDFLARE_ACCOUNT_ID"] ?? ""
+    let liveToken = ProcessInfo.processInfo.environment["CLOUDFLARE_API_TOKEN"] ?? ""
+    assert(!liveAccount.isEmpty && !liveToken.isEmpty, "CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN required for live check")
+    let live = CloudflareSTTEngine(config: CloudflareSTTConfig(accountID: liveAccount, apiToken: liveToken))
+    let clip = WAVWriter.createWAVData(from: Array(repeating: Float(0.1), count: 16_000), sampleRate: 16_000, channels: 1)
+    let liveResult = try await live.transcribe(audioData: clip, language: "en", prompt: nil)
+    print("✔ Live Cloudflare check: [\(liveResult.text)]")
+} else {
+    print("○ Live Cloudflare check skipped (set KANSO_LIVE_CLOUDFLARE=1 + CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_API_TOKEN to run)")
 }
 print("All KansoCore tests passed successfully! 🎉")

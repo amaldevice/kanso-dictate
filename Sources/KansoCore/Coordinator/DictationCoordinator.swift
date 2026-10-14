@@ -103,6 +103,14 @@ public final class DictationCoordinator: ObservableObject {
                 model: trimmed.isEmpty ? DeepgramSTTConfig.defaultModel : trimmed
             )
             return DeepgramSTTEngine(config: config)
+        case .cloudflare:
+            let accountID = defaults.string(forKey: "cloudflare_account_id")
+            let apiToken = defaults.string(forKey: "cloudflare_api_token")
+            let config = CloudflareSTTConfig(
+                accountID: (accountID?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ? accountID : nil,
+                apiToken: (apiToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ? apiToken : nil
+            )
+            return CloudflareSTTEngine(config: config)
         }
     }
 

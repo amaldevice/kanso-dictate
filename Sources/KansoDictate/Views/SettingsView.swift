@@ -13,6 +13,8 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var geminiModel: String
     @Published public var deepgramApiKey: String
     @Published public var deepgramModel: String
+    @Published public var cloudflareAccountID: String
+    @Published public var cloudflareApiToken: String
     @Published public var isAccessibilityGranted: Bool
 
     public var onSettingsChanged: (@MainActor () -> Void)?
@@ -30,6 +32,8 @@ public final class SettingsViewModel: ObservableObject {
         self.geminiModel = UserDefaults.standard.string(forKey: "gemini_model") ?? GeminiSTTConfig.defaultModel
         self.deepgramApiKey = UserDefaults.standard.string(forKey: "deepgram_api_key") ?? ""
         self.deepgramModel = UserDefaults.standard.string(forKey: "deepgram_model") ?? DeepgramSTTConfig.defaultModel
+        self.cloudflareAccountID = UserDefaults.standard.string(forKey: "cloudflare_account_id") ?? ""
+        self.cloudflareApiToken = UserDefaults.standard.string(forKey: "cloudflare_api_token") ?? ""
         self.isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
     }
 
@@ -44,6 +48,8 @@ public final class SettingsViewModel: ObservableObject {
         UserDefaults.standard.set(geminiModel, forKey: "gemini_model")
         UserDefaults.standard.set(deepgramApiKey, forKey: "deepgram_api_key")
         UserDefaults.standard.set(deepgramModel, forKey: "deepgram_model")
+        UserDefaults.standard.set(cloudflareAccountID, forKey: "cloudflare_account_id")
+        UserDefaults.standard.set(cloudflareApiToken, forKey: "cloudflare_api_token")
         onSettingsChanged?()
     }
 
@@ -91,6 +97,7 @@ public struct SettingsView: View {
                     Text("Local (WhisperKit CoreML)").tag(STTProviderMode.local)
                     Text("Gemini (Free Tier)").tag(STTProviderMode.gemini)
                     Text("Deepgram (Free Tier)").tag(STTProviderMode.deepgram)
+                    Text("Cloudflare (Free Tier)").tag(STTProviderMode.cloudflare)
                 }
                 .pickerStyle(.segmented)
                 .onChange(of: viewModel.providerMode) { viewModel.save() }
@@ -133,6 +140,18 @@ public struct SettingsView: View {
                         .onChange(of: viewModel.deepgramModel) { viewModel.save() }
 
                     Text("Cloud transcription via Deepgram $200 credit (no card). Audio leaves the device, unlike Local mode.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else if viewModel.providerMode == .cloudflare {
+                    TextField("Account ID:", text: $viewModel.cloudflareAccountID)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.cloudflareAccountID) { viewModel.save() }
+
+                    SecureField("API Token:", text: $viewModel.cloudflareApiToken)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.cloudflareApiToken) { viewModel.save() }
+
+                    Text("Cloud transcription via Cloudflare Workers AI (~$0.0005/min + daily free Neurons). Audio leaves the device, unlike Local mode.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 } else {
