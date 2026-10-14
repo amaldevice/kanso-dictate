@@ -85,6 +85,15 @@ public final class DictationCoordinator: ObservableObject {
                 model: model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "whisper-large-v3-turbo" : model
             )
             return OpenAICompatibleSTTEngine(config: config)
+        case .gemini:
+            let apiKey = defaults.string(forKey: "gemini_api_key")
+            let rawModel = defaults.string(forKey: "gemini_model") ?? GeminiSTTConfig.defaultModel
+            let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            let config = GeminiSTTConfig(
+                apiKey: (apiKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ? apiKey : nil,
+                model: trimmed.isEmpty ? GeminiSTTConfig.defaultModel : trimmed
+            )
+            return GeminiSTTEngine(config: config)
         }
     }
 
