@@ -16,6 +16,8 @@ mkdir -p "${BUNDLE_DIR}/Contents/MacOS"
 mkdir -p "${BUNDLE_DIR}/Contents/Resources"
 
 cp "${BIN_PATH}" "${BUNDLE_DIR}/Contents/MacOS/KansoDictate"
+chmod +x "${BUNDLE_DIR}/Contents/MacOS/KansoDictate"
+ln -sf "KansoDictate" "${BUNDLE_DIR}/Contents/MacOS/${APP_NAME}"
 cp "Sources/KansoDictate/Resources/Info.plist" "${BUNDLE_DIR}/Contents/Info.plist"
 
 echo "==> Applying ad-hoc codesign with entitlements..."
