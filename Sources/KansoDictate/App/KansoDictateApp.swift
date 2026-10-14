@@ -6,9 +6,11 @@ import KansoCore
 public final class WindowManager: ObservableObject {
     public var historyWindow: NSWindow?
     public var settingsWindow: NSWindow?
+    public weak var coordinator: DictationCoordinator?
 
-    public init() {}
-
+    public init(coordinator: DictationCoordinator? = nil) {
+        self.coordinator = coordinator
+    }
     public func openHistory(coordinator: DictationCoordinator) {
         if let window = historyWindow, window.isVisible {
             window.makeKeyAndOrderFront(nil)
@@ -31,7 +33,8 @@ public final class WindowManager: ObservableObject {
         self.historyWindow = window
     }
 
-    public func openSettings() {
+    public func openSettings(coordinator: DictationCoordinator? = nil) {
+        let activeCoordinator = coordinator ?? self.coordinator
         if let window = settingsWindow, window.isVisible {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -39,14 +42,14 @@ public final class WindowManager: ObservableObject {
         }
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 440),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
         window.center()
         window.title = "Kanso Dictate - Settings"
-        window.contentView = NSHostingView(rootView: SettingsView())
+        window.contentView = NSHostingView(rootView: SettingsView(coordinator: activeCoordinator))
         window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -60,18 +63,14 @@ public struct KansoDictateApp: App {
     private let eventTapManager = EventTapManager()
 
     public init() {
-        let baseURLStr = UserDefaults.standard.string(forKey: "stt_base_url") ?? "https://api.groq.com/openai/v1"
-        let apiKey = UserDefaults.standard.string(forKey: "stt_api_key")
-        let model = UserDefaults.standard.string(forKey: "stt_model") ?? "whisper-large-v3-turbo"
-
-        let config = OpenAICompatibleConfig(
-            baseURL: URL(string: baseURLStr) ?? URL(string: "https://api.groq.com/openai/v1")!,
-            apiKey: apiKey,
-            model: model
-        )
-        let engine = OpenAICompatibleSTTEngine(config: config)
-        let coordinatorInstance = DictationCoordinator(activeEngine: engine)
+        let coordinatorInstance = DictationCoordinator()
+        let windowManagerInstance = WindowManager(coordinator: coordinatorInstance)
         _coordinator = StateObject(wrappedValue: coordinatorInstance)
+        _windowManager = StateObject(wrappedValue: windowManagerInstance)
+        coordinatorInstance.onErrorNotification = { message in
+            // Non-modal error handling: log error without stealing focus from active application
+            NSLog("KansoDictate Error: %@", message)
+        }
 
         // Setup Right Option Push-To-Talk
         eventTapManager.onKeyDown = { [weak coordinatorInstance] in
@@ -87,6 +86,21 @@ public struct KansoDictateApp: App {
         }
 
         eventTapManager.start()
+    }
+
+    private var menuBarTitle: String {
+        switch coordinator.state {
+        case .idle:
+            return "Kanso Dictate"
+        case .recording:
+            return "Kanso Dictate (Recording)"
+        case .transcribing:
+            return "Kanso Dictate (Transcribing)"
+        case .inserting:
+            return "Kanso Dictate (Inserting)"
+        case .error(let msg):
+            return "Kanso Dictate - Error: \(msg)"
+        }
     }
 
     private var menuBarIcon: String {
@@ -120,9 +134,14 @@ public struct KansoDictateApp: App {
     }
 
     public var body: some Scene {
-        MenuBarExtra("Kanso Dictate", systemImage: menuBarIcon) {
+        MenuBarExtra(menuBarTitle, systemImage: menuBarIcon) {
             Text(statusMessage)
                 .font(.headline)
+                .help(statusMessage)
+
+            Text("Engine: \(coordinator.activeEngine.displayName)")
+                .font(.caption)
+                .foregroundColor(.secondary)
 
             Divider()
 
@@ -132,7 +151,7 @@ public struct KansoDictateApp: App {
             .keyboardShortcut("h")
 
             Button("Settings...") {
-                windowManager.openSettings()
+                windowManager.openSettings(coordinator: coordinator)
             }
             .keyboardShortcut(",")
 

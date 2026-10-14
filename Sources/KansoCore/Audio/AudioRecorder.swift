@@ -162,6 +162,7 @@ public final class AudioRecorder: @unchecked Sendable {
         )
     }
 
+
     private func stopSilently() {
         lock.lock()
         defer { lock.unlock() }

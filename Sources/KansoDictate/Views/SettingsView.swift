@@ -3,22 +3,36 @@ import KansoCore
 
 @MainActor
 public final class SettingsViewModel: ObservableObject {
+    @Published public var providerMode: STTProviderMode
     @Published public var baseURL: String
     @Published public var apiKey: String
     @Published public var modelName: String
+    @Published public var modelVariant: String
+    @Published public var cacheDirectory: String
     @Published public var isAccessibilityGranted: Bool
 
-    public init() {
+    public var onSettingsChanged: (@MainActor () -> Void)?
+
+    public init(onSettingsChanged: (@MainActor () -> Void)? = nil) {
+        self.onSettingsChanged = onSettingsChanged
+        let rawMode = UserDefaults.standard.string(forKey: "stt_provider_mode") ?? STTProviderMode.remote.rawValue
+        self.providerMode = STTProviderMode(rawValue: rawMode) ?? .remote
         self.baseURL = UserDefaults.standard.string(forKey: "stt_base_url") ?? "https://api.groq.com/openai/v1"
         self.apiKey = UserDefaults.standard.string(forKey: "stt_api_key") ?? ""
         self.modelName = UserDefaults.standard.string(forKey: "stt_model") ?? "whisper-large-v3-turbo"
+        self.modelVariant = UserDefaults.standard.string(forKey: "whisperkit_model_variant") ?? "openai_whisper-base"
+        self.cacheDirectory = UserDefaults.standard.string(forKey: "whisperkit_cache_directory") ?? WhisperKitConfig.defaultDownloadBase.path
         self.isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
     }
 
     public func save() {
+        UserDefaults.standard.set(providerMode.rawValue, forKey: "stt_provider_mode")
         UserDefaults.standard.set(baseURL, forKey: "stt_base_url")
         UserDefaults.standard.set(apiKey, forKey: "stt_api_key")
         UserDefaults.standard.set(modelName, forKey: "stt_model")
+        UserDefaults.standard.set(modelVariant, forKey: "whisperkit_model_variant")
+        UserDefaults.standard.set(cacheDirectory, forKey: "whisperkit_cache_directory")
+        onSettingsChanged?()
     }
 
     public func refreshPermissions() {
@@ -34,28 +48,62 @@ public final class SettingsViewModel: ObservableObject {
 public struct SettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
 
-    public init(viewModel: SettingsViewModel = SettingsViewModel()) {
-        self.viewModel = viewModel
+    public init(
+        viewModel: SettingsViewModel? = nil,
+        coordinator: DictationCoordinator? = nil,
+        onSettingsChanged: (@MainActor () -> Void)? = nil
+    ) {
+        let vm = viewModel ?? SettingsViewModel()
+        if let coordinator = coordinator {
+            vm.onSettingsChanged = {
+                onSettingsChanged?()
+                coordinator.configureEngineFromPreferences()
+            }
+        } else if let onSettingsChanged = onSettingsChanged {
+            vm.onSettingsChanged = onSettingsChanged
+        }
+        self.viewModel = vm
     }
 
     public var body: some View {
         Form {
-            Section("STT Provider (Remote OpenAI-Compatible)") {
-                TextField("Base URL:", text: $viewModel.baseURL)
-                    .textFieldStyle(.roundedBorder)
-                    .onChange(of: viewModel.baseURL) { viewModel.save() }
+            Section("Speech-to-Text Provider") {
+                Picker("Provider Mode:", selection: $viewModel.providerMode) {
+                    Text("Remote (OpenAI-Compatible)").tag(STTProviderMode.remote)
+                    Text("Local (WhisperKit CoreML)").tag(STTProviderMode.local)
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: viewModel.providerMode) { viewModel.save() }
 
-                SecureField("API Key (Groq / OpenAI):", text: $viewModel.apiKey)
-                    .textFieldStyle(.roundedBorder)
-                    .onChange(of: viewModel.apiKey) { viewModel.save() }
+                if viewModel.providerMode == .remote {
+                    TextField("Base URL:", text: $viewModel.baseURL)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.baseURL) { viewModel.save() }
 
-                TextField("Model Name:", text: $viewModel.modelName)
-                    .textFieldStyle(.roundedBorder)
-                    .onChange(of: viewModel.modelName) { viewModel.save() }
+                    SecureField("API Key (Groq / OpenAI):", text: $viewModel.apiKey)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.apiKey) { viewModel.save() }
 
-                Text("Supports Groq, OpenAI, Ollama, and self-hosted vLLM endpoints.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+                    TextField("Model Name:", text: $viewModel.modelName)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.modelName) { viewModel.save() }
+
+                    Text("Supports Groq, OpenAI, Ollama, and self-hosted vLLM endpoints.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else {
+                    TextField("Model Variant:", text: $viewModel.modelVariant)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.modelVariant) { viewModel.save() }
+
+                    TextField("Model Cache Directory:", text: $viewModel.cacheDirectory)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.cacheDirectory) { viewModel.save() }
+
+                    Text("Runs 100% locally on-device using WhisperKit and Apple Neural Engine.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
 
             Section("Push-To-Talk Hotkey") {
@@ -97,7 +145,7 @@ public struct SettingsView: View {
             }
         }
         .padding()
-        .frame(minWidth: 420, minHeight: 380)
+        .frame(minWidth: 420, minHeight: 420)
         .onAppear {
             viewModel.refreshPermissions()
         }
