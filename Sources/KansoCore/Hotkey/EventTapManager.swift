@@ -6,11 +6,14 @@ import ApplicationServices
 public final class EventTapManager: @unchecked Sendable {
     public enum Constants {
         public static let rightOptionKeyCode: Int64 = 0x3D // 61 decimal
+        public static let leftOptionKeyCode: Int64 = 0x3A  // 58 decimal
+        public static let alternateMask: UInt64 = CGEventFlags.maskAlternate.rawValue // 0x0008_0000
         public static let rightOptionMask: UInt64 = 0x0020_0000 // NX_DEVICERALTKEYMASK
     }
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var retryTimer: Timer?
     private let lock = NSLock()
     private var isKeyPressed = false
 
@@ -30,7 +33,8 @@ public final class EventTapManager: @unchecked Sendable {
         return AXIsProcessTrustedWithOptions(options)
     }
 
-    /// Starts listening for Right Option modifier transitions.
+    /// Starts listening for Option modifier transitions.
+    /// If accessibility is not yet granted, starts a lightweight retry observer on the main run loop.
     @discardableResult
     public func start() -> Bool {
         lock.lock()
@@ -53,8 +57,12 @@ public final class EventTapManager: @unchecked Sendable {
             },
             userInfo: observerPointer
         ) else {
+            scheduleAccessibilityRetry()
             return false
         }
+
+        retryTimer?.invalidate()
+        retryTimer = nil
 
         self.eventTap = tap
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
@@ -70,6 +78,9 @@ public final class EventTapManager: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
+        retryTimer?.invalidate()
+        retryTimer = nil
+
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
             if let source = runLoopSource {
@@ -79,6 +90,19 @@ public final class EventTapManager: @unchecked Sendable {
             self.eventTap = nil
         }
         isKeyPressed = false
+    }
+
+    private func scheduleAccessibilityRetry() {
+        guard retryTimer == nil else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.retryTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+                guard let self = self else { return }
+                if Self.isAccessibilityTrusted(prompt: false) {
+                    _ = self.start()
+                }
+            }
+        }
     }
 
     private func handleEvent(
@@ -96,9 +120,13 @@ public final class EventTapManager: @unchecked Sendable {
         }
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-        if keyCode == Constants.rightOptionKeyCode {
-            let flags = event.flags.rawValue
-            let isDown = (flags & Constants.rightOptionMask) != 0
+        let isOptionKey = (keyCode == Constants.rightOptionKeyCode || keyCode == Constants.leftOptionKeyCode)
+        let flags = event.flags.rawValue
+        let isAlternateDown = (flags & Constants.alternateMask) != 0
+
+        // Handle Option key transitions (Right or Left Option)
+        if isOptionKey || isAlternateDown != isKeyPressed {
+            let isDown = isAlternateDown
 
             lock.lock()
             let previousState = isKeyPressed

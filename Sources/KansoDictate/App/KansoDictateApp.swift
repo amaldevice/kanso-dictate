@@ -60,19 +60,26 @@ public final class WindowManager: ObservableObject {
 public struct KansoDictateApp: App {
     @StateObject private var coordinator: DictationCoordinator
     @StateObject private var windowManager = WindowManager()
+    @StateObject private var hudController: FloatingHUDController
     private let eventTapManager = EventTapManager()
 
     public init() {
         let coordinatorInstance = DictationCoordinator()
         let windowManagerInstance = WindowManager(coordinator: coordinatorInstance)
+        let hudInstance = FloatingHUDController(coordinator: coordinatorInstance)
         _coordinator = StateObject(wrappedValue: coordinatorInstance)
         _windowManager = StateObject(wrappedValue: windowManagerInstance)
+        _hudController = StateObject(wrappedValue: hudInstance)
         coordinatorInstance.onErrorNotification = { message in
-            // Non-modal error handling: log error without stealing focus from active application
             NSLog("KansoDictate Error: %@", message)
         }
 
-        // Setup Right Option Push-To-Talk
+        // Prompt for Accessibility on startup so macOS shows the System Settings authorization dialog
+        if !EventTapManager.isAccessibilityTrusted(prompt: true) {
+            NSLog("KansoDictate: Requesting Accessibility permission...")
+        }
+
+        // Setup Option Push-To-Talk
         eventTapManager.onKeyDown = { [weak coordinatorInstance] in
             Task { @MainActor in
                 coordinatorInstance?.startDictation()
@@ -87,7 +94,6 @@ public struct KansoDictateApp: App {
 
         eventTapManager.start()
     }
-
     private var menuBarTitle: String {
         switch coordinator.state {
         case .idle:
