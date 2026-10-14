@@ -103,6 +103,18 @@ public final class SettingsViewModel: ObservableObject {
             NSWorkspace.shared.open(url)
         }
     }
+
+    /// Re-checks trust then relaunches so the new process picks up the grant.
+    public func refreshAndRelaunch() {
+        refreshPermissions()
+        guard isAccessibilityGranted else { return }
+        let appURL = Bundle.main.bundleURL
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        task.arguments = [appURL.path]
+        try? task.run()
+        NSApplication.shared.terminate(nil)
+    }
 }
 
 public struct SettingsView: View {
@@ -319,9 +331,16 @@ public struct SettingsView: View {
                             viewModel.openSystemSettings()
                         }
                     } else {
+                        Button("Refresh Status") {
+                            viewModel.refreshPermissions()
+                        }
                         Button("Grant Access") {
                             viewModel.requestPermissions()
                         }
+                        Button("Relaunch App") {
+                            viewModel.refreshAndRelaunch()
+                        }
+                        .disabled(!viewModel.isAccessibilityGranted)
                     }
                 }
 
