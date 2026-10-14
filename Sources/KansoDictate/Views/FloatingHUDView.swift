@@ -76,10 +76,9 @@ public struct FloatingHUDView: View {
     private var statusLabel: some View {
         switch coordinator.state {
         case .recording:
-            Text("Listening...")
+            Text(coordinator.isLockedRecording ? "Listening (Tap ⌥ to stop)" : "Listening...")
                 .font(.system(size: 13, weight: .semibold, design: .rounded))
                 .foregroundColor(.primary)
-
         case .transcribing:
             Text("Transcribing...")
                 .font(.system(size: 13, weight: .medium, design: .rounded))

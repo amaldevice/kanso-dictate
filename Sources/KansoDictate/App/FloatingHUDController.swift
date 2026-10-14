@@ -21,22 +21,21 @@ public final class FloatingHUDController: ObservableObject {
         let hostingView = NSHostingView(rootView: hudView)
 
         let panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 200, height: 46),
+            contentRect: NSRect(x: 0, y: 0, width: 220, height: 48),
             styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false
         )
 
         panel.isFloatingPanel = true
-        panel.level = .floating
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.level = .popUpMenu
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = false
         panel.contentView = hostingView
         panel.isReleasedWhenClosed = false
         panel.hidesOnDeactivate = false
-
         self.panel = panel
     }
 

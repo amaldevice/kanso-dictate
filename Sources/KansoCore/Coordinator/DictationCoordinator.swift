@@ -27,6 +27,8 @@ public final class DictationCoordinator: ObservableObject {
     public let injector: TextInjector
     public let historyStore: HistoryStore
     @Published public var activeEngine: any SpeechToTextEngine
+    private var recordingStartTime: Date?
+    @Published public private(set) var isLockedRecording: Bool = false
 
     public init(
         recorder: any AudioRecordingService = AudioRecorder(),
@@ -178,12 +180,12 @@ public final class DictationCoordinator: ObservableObject {
     }
 
     /// Stops audio recording, invokes STT engine, and injects transcribed text.
-    public func stopDictation() {
+    public func stopDictation(forceCommit: Bool = false) {
         guard state == .recording else { return }
 
         do {
             let recording = try recorder.stopRecording()
-            guard recording.durationSeconds >= 0.3 else {
+            guard recording.durationSeconds >= 0.3 || forceCommit else {
                 // Micro-tap guard: abort without error, alert, or STT invocation
                 state = .idle
                 return

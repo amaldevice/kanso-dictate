@@ -150,6 +150,16 @@ public struct KansoDictateApp: App {
                 .foregroundColor(.secondary)
 
             Divider()
+            if coordinator.state == .recording {
+                Button("Stop Dictation & Transcribe") {
+                    coordinator.stopDictation(forceCommit: true)
+                }
+            } else {
+                Button("Start Dictation (or Hold ⌥)") {
+                    coordinator.startDictation()
+                }
+            }
+
 
             Button("History...") {
                 windowManager.openHistory(coordinator: coordinator)

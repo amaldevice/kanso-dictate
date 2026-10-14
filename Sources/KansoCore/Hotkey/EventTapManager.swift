@@ -45,8 +45,9 @@ public final class EventTapManager: @unchecked Sendable {
         let mask = (1 << CGEventType.flagsChanged.rawValue)
         let observerPointer = Unmanaged.passUnretained(self).toOpaque()
 
+        // Use .cgSessionEventTap for GUI user-session interception
         guard let tap = CGEvent.tapCreate(
-            tap: .cghidEventTap,
+            tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .listenOnly,
             eventsOfInterest: CGEventMask(mask),
@@ -57,6 +58,7 @@ public final class EventTapManager: @unchecked Sendable {
             },
             userInfo: observerPointer
         ) else {
+            NSLog("KansoDictate: CGEvent.tapCreate returned nil. Scheduling Accessibility retry...")
             scheduleAccessibilityRetry()
             return false
         }
@@ -70,6 +72,7 @@ public final class EventTapManager: @unchecked Sendable {
 
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
+        NSLog("KansoDictate: Global hotkey event tap established successfully.")
         return true
     }
 
@@ -120,7 +123,7 @@ public final class EventTapManager: @unchecked Sendable {
         }
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-        let isOptionKey = (keyCode == Constants.rightOptionKeyCode || keyCode == Constants.leftOptionKeyCode)
+        let isOptionKey = (keyCode == Constants.rightOptionKeyCode || keyCode == Constants.leftOptionKeyCode || keyCode == 61 || keyCode == 58)
         let flags = event.flags.rawValue
         let isAlternateDown = (flags & Constants.alternateMask) != 0
 
@@ -134,8 +137,10 @@ public final class EventTapManager: @unchecked Sendable {
             lock.unlock()
 
             if isDown && !previousState {
+                NSLog("KansoDictate: Option KeyDown detected (keyCode: %lld)", keyCode)
                 onKeyDown?()
             } else if !isDown && previousState {
+                NSLog("KansoDictate: Option KeyUp detected (keyCode: %lld)", keyCode)
                 onKeyUp?()
             }
         }
