@@ -61,6 +61,7 @@ public struct KansoDictateApp: App {
     @StateObject private var coordinator: DictationCoordinator
     @StateObject private var windowManager = WindowManager()
     @StateObject private var hudController: FloatingHUDController
+    @State private var isHotkeyActive = EventTapManager.isAccessibilityTrusted(prompt: false)
     private let eventTapManager = EventTapManager()
 
     public init() {
@@ -146,8 +147,7 @@ public struct KansoDictateApp: App {
             Text("Engine: \(coordinator.activeEngine.displayName)")
                 .font(.caption)
                 .foregroundColor(.secondary)
-
-            if !EventTapManager.isAccessibilityTrusted(prompt: false) {
+            if !isHotkeyActive {
                 Text("⚠️ Option hotkey OFF — grant Accessibility in Settings")
                     .font(.caption)
                     .foregroundColor(.orange)
@@ -186,7 +186,11 @@ public struct KansoDictateApp: App {
         .onChange(of: coordinator.state) { _ in
             if coordinator.state == .idle {
                 eventTapManager.resyncModifierState()
+                isHotkeyActive = EventTapManager.isAccessibilityTrusted(prompt: false)
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+            isHotkeyActive = EventTapManager.isAccessibilityTrusted(prompt: false)
         }
     }
 }
