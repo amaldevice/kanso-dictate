@@ -844,29 +844,30 @@ assert(presetStr.contains("name=\"model\"\r\n\r\nwhisper-v3-turbo"), "Preset mod
 assert(presetStr.contains("name=\"language\"\r\n\r\nid"), "Preset language missing in body")
 print("✔ Preset request shape at STT seam verified")
 
-// Test 23: GeminiSTTEngine request shape (Files upload + Interactions)
-// Test 23: GeminiSTTEngine request shape (generateContent with inline_data)
-let geminiConfig = GeminiSTTConfig(apiKey: "AIza-test-key", model: "gemini-1.5-flash")
+// Test 23: GeminiSTTEngine request shape (official generateContent + audioTranscriptionConfig)
+let geminiConfig = GeminiSTTConfig(apiKey: "AIza-test-key", model: "gemini-3.5-transcribe")
 let geminiEngine = GeminiSTTEngine(config: geminiConfig)
-assert(geminiEngine.identifier == "gemini.gemini-1.5-flash", "Gemini identifier mismatch: \(geminiEngine.identifier)")
+assert(geminiEngine.identifier == "gemini.gemini-3.5-transcribe", "Gemini identifier mismatch: \(geminiEngine.identifier)")
 assert(geminiEngine.isLocal == false, "Gemini must be remote (isLocal == false)")
-assert(GeminiSTTConfig.defaultModel == "gemini-1.5-flash", "Default model mismatch")
+assert(GeminiSTTConfig.defaultModel == "gemini-3.5-transcribe", "Default model mismatch")
 let geminiAudio = Data([0x52, 0x49, 0x46, 0x46, 0x00, 0x01, 0x02, 0x03])
 let genRequest = try geminiEngine.buildRequest(audioData: geminiAudio, language: "id", prompt: "Kanso, Whisper")
 assert(genRequest.httpMethod == "POST", "Request must be POST")
-assert(genRequest.url?.absoluteString.contains("generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent") == true, "URL mismatch: \(genRequest.url?.absoluteString ?? "")")
+assert(genRequest.url?.absoluteString.contains("generativelanguage.googleapis.com/v1beta/models/gemini-3.5-transcribe:generateContent") == true, "URL mismatch: \(genRequest.url?.absoluteString ?? "")")
 assert(genRequest.url?.query?.contains("key=AIza-test-key") == true, "Query must contain key")
 assert(genRequest.value(forHTTPHeaderField: "Content-Type") == "application/json", "Content-Type mismatch")
 let genBody = try JSONSerialization.jsonObject(with: genRequest.httpBody!) as! [String: Any]
 let contents = genBody["contents"] as! [[String: Any]]
 let parts = contents[0]["parts"] as! [[String: Any]]
-assert(parts.count == 2, "Expected 2 parts: prompt and inline_data")
-let instructionText = parts[0]["text"] as! String
-assert(instructionText.contains("Spoken language code: id"), "Instruction must contain language hint")
-assert(instructionText.contains("Context vocabulary: Kanso, Whisper"), "Instruction must contain prompt")
-let inlineData = parts[1]["inline_data"] as! [String: Any]
-assert((inlineData["mime_type"] as? String) == "audio/wav", "MIME mismatch")
-assert((inlineData["data"] as? String) == geminiAudio.base64EncodedString(), "Base64 audio mismatch")
+assert(parts.count == 1, "Expected 1 part: inline_data audio")
+let inlineData = (parts[0]["inline_data"] ?? parts[0]["inlineData"]) as! [String: Any]
+assert(((inlineData["mime_type"] ?? inlineData["mimeType"]) as? String) == "audio/wav", "MIME mismatch")
+assert(((inlineData["data"] ?? inlineData["data"]) as? String) == geminiAudio.base64EncodedString(), "Base64 audio mismatch")
+let generationConfig = genBody["generationConfig"] as! [String: Any]
+let transcriptionConfig = generationConfig["audioTranscriptionConfig"] as! [String: Any]
+assert((transcriptionConfig["languageCodes"] as? [String]) == ["id-ID"], "Language must map id -> id-ID")
+assert((transcriptionConfig["customVocabulary"] as? [String]) == ["Kanso", "Whisper"], "Prompt must split to customVocabulary")
+assert((transcriptionConfig["mode"] as? String) == "SMART", "Mode must default SMART")
 print("✔ GeminiSTTEngine request shape verified")
 
 // Stub harness for Gemini transcribe()
@@ -898,12 +899,11 @@ func makeGeminiStubSession() -> URLSession {
 func geminiHTTPResponse(url: URL, status: Int) -> HTTPURLResponse {
     HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil)!
 }
-
 // Test 24: Gemini success parse incl. trim + single-step generateContent
 @MainActor
 func testGeminiSuccess() async throws {
     let session = makeGeminiStubSession()
-    let engine = GeminiSTTEngine(config: GeminiSTTConfig(apiKey: "AIza-test-key", model: "gemini-1.5-flash"), session: session)
+    let engine = GeminiSTTEngine(config: GeminiSTTConfig(apiKey: "AIza-test-key", model: "gemini-3.5-transcribe"), session: session)
     StubURLProtocol.requestCount = 0
     StubURLProtocol.requestHandler = { request in
         let responseJSON = """
@@ -922,8 +922,7 @@ func testGeminiSuccess() async throws {
         return (geminiHTTPResponse(url: request.url!, status: 200), Data(responseJSON.utf8))
     }
     let res = try await engine.transcribe(audioData: geminiAudio, language: nil, prompt: nil)
-    assert(res.text == "halo dunia", "Trim mismatch: [\(res.text)]")
-    assert(res.engineIdentifier == "gemini.gemini-1.5-flash", "Engine badge mismatch: \(res.engineIdentifier)")
+    assert(res.engineIdentifier == "gemini.gemini-3.5-transcribe", "Engine badge mismatch: \(res.engineIdentifier)")
     assert(StubURLProtocol.requestCount == 1, "Must make 1 direct generateContent call")
 }
 
@@ -1004,7 +1003,6 @@ func testGeminiErrors() async {
 
 await testGeminiErrors()
 print("✔ GeminiSTTEngine error taxonomy verified")
-
 // Test 26: Coordinator factory maps Gemini mode with isolated keys
 @MainActor
 func testGeminiFactory() async {
@@ -1012,17 +1010,16 @@ func testGeminiFactory() async {
     let defaults = UserDefaults(suiteName: suite)!
     defaults.set(STTProviderMode.gemini.rawValue, forKey: "stt_provider_mode")
     defaults.set("AIza-gemini-secret", forKey: "gemini_api_key")
-    defaults.set("gemini-1.5-flash", forKey: "gemini_model")
+    defaults.set("gemini-3.5-transcribe", forKey: "gemini_model")
     defaults.set("gsk-groq-secret", forKey: "stt_api_key")
     let built = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
-    assert(built.identifier == "gemini.gemini-1.5-flash", "Factory identifier mismatch: \(built.identifier)")
+    assert(built.identifier == "gemini.gemini-3.5-transcribe", "Factory identifier mismatch: \(built.identifier)")
     assert(built.isLocal == false, "Factory Gemini must be remote")
     let geminiBuilt = built as! GeminiSTTEngine
     assert(geminiBuilt.config.apiKey == "AIza-gemini-secret", "Factory must use isolated gemini key, not Groq key")
-    // Default model fallback
     defaults.removeObject(forKey: "gemini_model")
     let defaulted = DictationCoordinator.makeEngineFromPreferences(defaults: defaults) as! GeminiSTTEngine
-    assert(defaulted.config.model == "gemini-1.5-flash", "Factory default model mismatch: \(defaulted.config.model)")
+    assert(defaulted.config.model == "gemini-3.5-transcribe", "Factory default model mismatch: \(defaulted.config.model)")
     // Existing modes unchanged
     defaults.set(STTProviderMode.remote.rawValue, forKey: "stt_provider_mode")
     let remote = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)

@@ -2,7 +2,7 @@ import Foundation
 
 /// Configuration for the Google Gemini Developer API Remote STT Engine.
 public struct GeminiSTTConfig: Sendable, Equatable {
-    public static let defaultModel = "gemini-1.5-flash"
+    public static let defaultModel = "gemini-3.5-transcribe"
 
     public let apiKey: String?
     public let model: String
@@ -15,17 +15,15 @@ public struct GeminiSTTConfig: Sendable, Equatable {
     ) {
         self.apiKey = apiKey
         let trimmed = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty || trimmed == "gemini-3.5-transcribe" {
-            self.model = Self.defaultModel
-        } else {
-            self.model = trimmed
-        }
+        self.model = trimmed.isEmpty ? Self.defaultModel : trimmed
         self.timeoutInterval = timeoutInterval
     }
 }
 
 /// Remote STT engine backed by the Google Gemini Developer API (AI Studio).
-/// Uses official `v1beta/models/{model}:generateContent` with base64 `inline_data`.
+/// Uses official `v1beta/models/gemini-3.5-transcribe:generateContent` with
+/// base64 `inline_data` plus `generationConfig.audioTranscriptionConfig`.
+/// Docs: https://ai.google.dev/gemini-api/docs/generate-content/transcribe
 public final class GeminiSTTEngine: SpeechToTextEngine, @unchecked Sendable {
     public let identifier: String
     public let displayName: String
@@ -52,11 +50,26 @@ public final class GeminiSTTEngine: SpeechToTextEngine, @unchecked Sendable {
     }
 
     public func endpointURL(for model: String) -> URL {
-        let cleanModel = model.isEmpty || model == "gemini-3.5-transcribe" ? GeminiSTTConfig.defaultModel : model
-        return URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(cleanModel):generateContent")!
+        let clean = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effective = clean.isEmpty ? GeminiSTTConfig.defaultModel : clean
+        return URL(string: "https://generativelanguage.googleapis.com/v1beta/models/\(effective):generateContent")!
     }
 
-    /// Builds the `generateContent` URLRequest with base64 audio and transcription prompt.
+    /// Maps a short language tag ("id", "en") to BCP-47 for Gemini.
+    public static func bcp47Code(for language: String?) -> String? {
+        guard let lang = language?.trimmingCharacters(in: .whitespacesAndNewlines), !lang.isEmpty else {
+            return nil
+        }
+        let lower = lang.lowercased()
+        if lower.contains("-") { return lang } // already BCP-47
+        switch lower {
+        case "id": return "id-ID"
+        case "en": return "en-US"
+        default: return lang
+        }
+    }
+
+    /// Builds the `generateContent` URLRequest with base64 audio and transcription config.
     public func buildRequest(audioData: Data, language: String?, prompt: String?) throws -> URLRequest {
         guard !audioData.isEmpty else {
             throw STTError.emptyAudioData
@@ -75,30 +88,29 @@ public final class GeminiSTTEngine: SpeechToTextEngine, @unchecked Sendable {
         request.httpMethod = "POST"
         request.timeoutInterval = config.timeoutInterval
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        var instruction = "Transcribe this audio verbatim. Output ONLY the raw transcribed text. Do not add any conversational filler, markdown formatting, or quotes."
-        if let lang = language?.trimmingCharacters(in: .whitespacesAndNewlines), !lang.isEmpty {
-            instruction += " Spoken language code: \(lang)."
-        }
-        if let userPrompt = prompt?.trimmingCharacters(in: .whitespacesAndNewlines), !userPrompt.isEmpty {
-            instruction += " Context vocabulary: \(userPrompt)."
-        }
+        request.setValue(key, forHTTPHeaderField: "x-goog-api-key")
 
         let base64Audio = audioData.base64EncodedString()
+        var transcriptionConfig: [String: Any] = ["mode": "SMART"]
+        if let code = Self.bcp47Code(for: language) {
+            transcriptionConfig["languageCodes"] = [code]
+        }
+        if let userPrompt = prompt?.trimmingCharacters(in: .whitespacesAndNewlines), !userPrompt.isEmpty {
+            let terms = userPrompt.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+            if !terms.isEmpty {
+                transcriptionConfig["customVocabulary"] = terms
+            }
+        }
+
         let body: [String: Any] = [
             "contents": [
                 [
                     "parts": [
-                        ["text": instruction],
-                        [
-                            "inline_data": [
-                                "mime_type": "audio/wav",
-                                "data": base64Audio
-                            ]
-                        ]
+                        ["inline_data": ["mime_type": "audio/wav", "data": base64Audio]]
                     ]
                 ]
-            ]
+            ],
+            "generationConfig": ["audioTranscriptionConfig": transcriptionConfig]
         ]
 
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -138,6 +150,8 @@ public final class GeminiSTTEngine: SpeechToTextEngine, @unchecked Sendable {
             return .httpError(statusCode: statusCode, message: "Invalid Gemini request (check model/audio): \(serverMessage)")
         case 401, 403:
             return .httpError(statusCode: statusCode, message: "Invalid Gemini API key: \(serverMessage)")
+        case 404:
+            return .httpError(statusCode: statusCode, message: "Gemini model not found (check model name): \(serverMessage)")
         case 429:
             return .httpError(statusCode: statusCode, message: "Gemini quota exceeded: \(serverMessage)")
         case 500...599:
