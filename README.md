@@ -22,8 +22,10 @@ Commercial tools like Wispr Flow and Superwhisper wrap 120MB+ Electron container
   - 100% private and offline: audio bytes never touch the network.
   - Isolated inside a dedicated background `actor WhisperTranscriptionActor` off the main thread to prevent UI hitches during model loading and tensor evaluation.
   - Automatic model caching in `~/Library/Application Support/KansoDictate/models` (defaults to `openai_whisper-base` for sub-100ms chunk processing).
-- **Remote Cloud Turbo Engine (OpenAI-Compatible)**:
+- **Remote Cloud Turbo Engine (OpenAI-Compatible + Free-Tier Engines)**:
   - Universal REST client supporting any endpoint implementing `/v1/audio/transcriptions` (Groq, OpenAI, Cloudflare, Ollama, self-hosted vLLM/LocalAI).
+  - One-click presets for cheap drop-ins: Mistral Voxtral (`voxtral-mini-latest`), Fireworks AI (Whisper turbo), Together AI (Whisper Large v3).
+  - First-class free-tier engines with isolated credentials: Google Gemini Developer API (free RPD, no card), Deepgram ($200 credit), Cloudflare Workers AI (daily free pool), AssemblyAI ($50), Speechmatics ($100 grant), Rev.ai (5 hrs), ElevenLabs Scribe.
   - Groq `whisper-large-v3-turbo` achieves sub-250ms round-trip transcription.
   - Multipart/form-data streaming constructed in memory with custom vocabulary prompt biasing and automatic endpoint URL normalization.
 - **Dynamic Hot-Swapping**: Switch between Local CoreML and Remote Cloud modes on the fly from the Settings window without restarting the application.
@@ -137,6 +139,9 @@ swift run KansoDictate --test-mic
 
 # 3. Test remote STT transcription against Groq or OpenAI
 swift run KansoDictate --test-remote <YOUR_GROQ_OR_OPENAI_API_KEY>
+
+# 3b. Test any free-tier engine key (gemini|deepgram|cloudflare|assemblyai|speechmatics|revai|elevenlabs; cloudflare takes "<accountId>:<apiToken>")
+swift run KansoDictate --test-engine gemini <YOUR_GEMINI_API_KEY>
 
 # 4. Test synthetic text injection and clipboard restoration into active window
 swift run KansoDictate --test-inject "Hello from Kanso Dictate!"

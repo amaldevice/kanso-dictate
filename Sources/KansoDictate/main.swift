@@ -65,6 +65,55 @@ if CommandLine.arguments.contains("--test-mic") {
         }
     }
     RunLoop.main.run()
+} else if let engineIndex = CommandLine.arguments.firstIndex(of: "--test-engine"), engineIndex + 2 < CommandLine.arguments.count {
+    // ponytail: single generic key check for every Remote STT Engine; per-engine flags if this one confuses users.
+    let modeArg = CommandLine.arguments[engineIndex + 1]
+    let credential = CommandLine.arguments[engineIndex + 2]
+    let engine: any SpeechToTextEngine
+    switch modeArg {
+    case "gemini":
+        engine = GeminiSTTEngine(config: GeminiSTTConfig(apiKey: credential))
+    case "deepgram":
+        engine = DeepgramSTTEngine(config: DeepgramSTTConfig(apiKey: credential))
+    case "assemblyai":
+        engine = AssemblyAISTTEngine(config: AssemblyAISTTConfig(apiKey: credential))
+    case "speechmatics":
+        engine = SpeechmaticsSTTEngine(config: SpeechmaticsSTTConfig(apiKey: credential))
+    case "revai":
+        engine = RevAISTTEngine(config: RevAISTTConfig(apiKey: credential))
+    case "elevenlabs":
+        engine = ElevenLabsSTTEngine(config: ElevenLabsSTTConfig(apiKey: credential))
+    case "cloudflare":
+        let parts = credential.split(separator: ":", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else {
+            print("❌ Cloudflare needs \"<accountId>:<apiToken>\" as credential.")
+            exit(2)
+        }
+        engine = CloudflareSTTEngine(config: CloudflareSTTConfig(accountID: parts[0], apiToken: parts[1]))
+    default:
+        print("❌ Unknown engine mode \"\(modeArg)\".")
+        exit(2)
+    }
+    print("🌐 Kanso Dictate: Testing \(engine.displayName)...")
+    let recorder = AudioRecorder()
+    Task {
+        do {
+            print("🎙️ Recording 3 seconds for transcription test...")
+            try recorder.startRecording()
+            try await Task.sleep(nanoseconds: 3_000_000_000)
+            let recording = try recorder.stopRecording()
+            print("⏳ Uploading \(recording.wavData.count) bytes to \(engine.displayName)...")
+            let result = try await engine.transcribe(audioData: recording.wavData, language: "en", prompt: nil)
+            print("✔ Transcription Succeeded! Result:")
+            print("  - Text: \"\(result.text)\"")
+            print("  - Duration: \(String(format: "%.2f", result.durationSeconds))s")
+            exit(0)
+        } catch {
+            print("❌ Transcription failed: \(error.localizedDescription)")
+            exit(1)
+        }
+    }
+    RunLoop.main.run()
 } else if let injectIndex = CommandLine.arguments.firstIndex(of: "--test-inject"), injectIndex + 1 < CommandLine.arguments.count {
     let textToPaste = CommandLine.arguments[injectIndex + 1]
     print("⌨️ Kanso Dictate: Testing TextInjector with simulated Cmd+V...")

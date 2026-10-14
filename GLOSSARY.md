@@ -23,7 +23,7 @@ The polymorphic transcription abstraction interface that consumes 16kHz mono aud
 A speech-to-text implementation running entirely on-device using CoreML and the Apple Silicon Neural Engine (ANE), specifically via `WhisperKit`.
 
 ### Remote STT Engine
-A speech-to-text implementation sending audio over HTTP to an OpenAI-compatible `/v1/audio/transcriptions` endpoint (e.g. Groq, OpenAI, Ollama, self-hosted vLLM).
+A speech-to-text implementation sending audio over HTTP to a cloud endpoint: either an OpenAI-compatible `/v1/audio/transcriptions` endpoint (e.g. Groq, OpenAI, Mistral Voxtral, Fireworks AI, Together AI, Ollama, self-hosted vLLM) or a first-class proprietary engine (Gemini Developer API, Deepgram, Cloudflare Workers AI, AssemblyAI, Speechmatics, Rev.ai, ElevenLabs Scribe).
 
 ### History Store
 The local database layer (implemented via `SwiftData`) recording past dictations, timestamps, durations, and target application identifiers.
