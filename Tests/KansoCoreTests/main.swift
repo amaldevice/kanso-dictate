@@ -590,7 +590,7 @@ func testDynamicEngineSwitching() async {
     let suiteName = "test.dictation.switching.\(UUID().uuidString)"
     let testDefaults = UserDefaults(suiteName: suiteName)!
     // Verify STTProviderMode enum
-    assert(STTProviderMode.allCases == [.remote, .local])
+    assert(STTProviderMode.allCases == [.remote, .local, .gemini])
     assert(STTProviderMode.remote.rawValue == "remote")
     assert(STTProviderMode.local.rawValue == "local")
     assert(STTProviderMode(rawValue: "remote") == .remote)
@@ -843,4 +843,225 @@ guard let presetBody = presetReq.httpBody, let presetStr = String(data: presetBo
 assert(presetStr.contains("name=\"model\"\r\n\r\nwhisper-v3-turbo"), "Preset model missing in body")
 assert(presetStr.contains("name=\"language\"\r\n\r\nid"), "Preset language missing in body")
 print("✔ Preset request shape at STT seam verified")
+
+// Test 23: GeminiSTTEngine request shape (Files upload + Interactions)
+let geminiConfig = GeminiSTTConfig(apiKey: "AIza-test-key", model: "gemini-3.5-transcribe")
+let geminiEngine = GeminiSTTEngine(config: geminiConfig)
+assert(geminiEngine.identifier == "gemini.gemini-3.5-transcribe", "Gemini identifier mismatch: \(geminiEngine.identifier)")
+assert(geminiEngine.isLocal == false, "Gemini must be remote (isLocal == false)")
+assert(GeminiSTTConfig.defaultModel == "gemini-3.5-transcribe", "Default model mismatch")
+let geminiAudio = Data([0x52, 0x49, 0x46, 0x46, 0x00, 0x01, 0x02, 0x03])
+let uploadRequest = try geminiEngine.buildUploadRequest(audioData: geminiAudio)
+assert(uploadRequest.httpMethod == "POST", "Upload must be POST")
+assert(uploadRequest.url?.absoluteString.contains("generativelanguage.googleapis.com") == true, "Upload host mismatch")
+assert(uploadRequest.value(forHTTPHeaderField: "x-goog-api-key") == "AIza-test-key", "Missing x-goog-api-key header")
+assert(uploadRequest.value(forHTTPHeaderField: "Content-Type") == "audio/wav", "Upload Content-Type mismatch")
+assert(uploadRequest.httpBody == geminiAudio, "Upload body must be raw WAV bytes")
+let interactRequest = try geminiEngine.buildInteractionsRequest(fileURI: "https://example.com/files/abc", language: nil, prompt: "Kanso, Whisper")
+assert(interactRequest.httpMethod == "POST", "Interactions must be POST")
+assert(interactRequest.url?.absoluteString == "https://generativelanguage.googleapis.com/v1beta/interactions", "Interactions URL mismatch")
+assert(interactRequest.value(forHTTPHeaderField: "x-goog-api-key") == "AIza-test-key", "Interactions missing API key header")
+let interactBody = try JSONSerialization.jsonObject(with: interactRequest.httpBody!) as! [String: Any]
+assert((interactBody["model"] as? String) == "gemini-3.5-transcribe", "Model mismatch in body")
+let inputs = interactBody["input"] as! [[String: Any]]
+assert((inputs[0]["audio_uri"] as? String) == "https://example.com/files/abc", "Audio URI mismatch")
+assert((inputs[0]["mime_type"] as? String) == "audio/wav", "MIME mismatch")
+let genConfig = (interactBody["generation_config"] as! [String: Any])["transcription_config"] as! [String: Any]
+assert((genConfig["mode"] as? String) == "verbatim", "Mode must be verbatim")
+assert(((genConfig["custom_vocabulary"] as? [String]) ?? []).contains("Kanso"), "Prompt must map to custom_vocabulary")
+// Empty prompt sends no custom list; unset language sends no hint
+let bareRequest = try geminiEngine.buildInteractionsRequest(fileURI: "https://example.com/files/abc", language: nil, prompt: nil)
+let bareBody = try JSONSerialization.jsonObject(with: bareRequest.httpBody!) as! [String: Any]
+let bareTC = ((bareBody["generation_config"] as! [String: Any])["transcription_config"] as! [String: Any])
+assert(bareTC["custom_vocabulary"] == nil, "Empty prompt must omit custom_vocabulary")
+assert(bareTC["language_code"] == nil, "Unset language must omit hint")
+let hintedRequest = try geminiEngine.buildInteractionsRequest(fileURI: "https://example.com/files/abc", language: "id", prompt: nil)
+let hintedBody = try JSONSerialization.jsonObject(with: hintedRequest.httpBody!) as! [String: Any]
+let hintedTC = ((hintedBody["generation_config"] as! [String: Any])["transcription_config"] as! [String: Any])
+assert((hintedTC["language_code"] as? String) == "id", "Language hint mismatch")
+print("✔ GeminiSTTEngine request shape verified")
+
+// Stub harness for Gemini transcribe()
+final class StubURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    nonisolated(unsafe) static var requestCount = 0
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        StubURLProtocol.requestCount += 1
+        do {
+            let (response, data) = try StubURLProtocol.requestHandler!(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+    override func stopLoading() {}
+}
+
+func makeGeminiStubSession() -> URLSession {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [StubURLProtocol.self]
+    return URLSession(configuration: config)
+}
+
+func geminiHTTPResponse(url: URL, status: Int) -> HTTPURLResponse {
+    HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil)!
+}
+
+// Test 24: Gemini success parse incl. trim + duration fallback
+@MainActor
+func testGeminiSuccess() async throws {
+    let session = makeGeminiStubSession()
+    let engine = GeminiSTTEngine(config: GeminiSTTConfig(apiKey: "AIza-test-key"), session: session)
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        let urlStr = request.url!.absoluteString
+        if urlStr.contains("/upload/") {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"file\":{\"uri\":\"https://example.com/files/abc\"}}".utf8))
+        } else {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"output_text\":\"  halo dunia  \",\"duration\":1.2}".utf8))
+        }
+    }
+    let res = try await engine.transcribe(audioData: geminiAudio, language: nil, prompt: nil)
+    assert(res.text == "halo dunia", "Trim mismatch: [\(res.text)]")
+    assert(abs(res.durationSeconds - 1.2) < 0.001, "Duration mismatch")
+    assert(res.engineIdentifier == "gemini.gemini-3.5-transcribe", "Engine badge mismatch")
+    assert(StubURLProtocol.requestCount == 2, "Must make upload + interactions calls")
+    // Duration fallback when server omits it
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        if request.url!.absoluteString.contains("/upload/") {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"file\":{\"uri\":\"https://example.com/files/abc\"}}".utf8))
+        } else {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"output_text\":\"hello\"}".utf8))
+        }
+    }
+    let res2 = try await engine.transcribe(audioData: geminiAudio, language: "en", prompt: nil)
+    assert(res2.text == "hello", "Fallback text mismatch")
+    assert(res2.durationSeconds >= 0, "Fallback duration must be measured")
+}
+
+try await testGeminiSuccess()
+print("✔ GeminiSTTEngine success parse verified")
+
+// Test 25: Gemini error taxonomy (400/401/403/429/5xx/network/empty-audio)
+@MainActor
+func testGeminiErrors() async {
+    let session = makeGeminiStubSession()
+    let engine = GeminiSTTEngine(config: GeminiSTTConfig(apiKey: "AIza-test-key"), session: session)
+    let uploadOK = Data("{\"file\":{\"uri\":\"https://example.com/files/abc\"}}".utf8)
+    func checkStatus(_ status: Int, matches: String) async {
+        StubURLProtocol.requestHandler = { request in
+            if request.url!.absoluteString.contains("/upload/") {
+                return (geminiHTTPResponse(url: request.url!, status: 200), uploadOK)
+            }
+            return (geminiHTTPResponse(url: request.url!, status: status), Data("{\"error\":{\"message\":\"server says no\"}}".utf8))
+        }
+        do {
+            _ = try await engine.transcribe(audioData: geminiAudio, language: nil, prompt: nil)
+            assert(false, "Expected httpError")
+        } catch let err as STTError {
+            if case .httpError(let code, let msg) = err {
+                assert(code == status, "Status mismatch")
+                assert(msg.lowercased().contains(matches.lowercased()), "Error message must name failure class")
+            } else {
+                assert(false, "Wrong STTError case")
+            }
+        } catch {
+            assert(false, "Unexpected error type")
+        }
+    }
+    await checkStatus(400, matches: "Invalid")
+    await checkStatus(401, matches: "API key")
+    await checkStatus(403, matches: "API key")
+    await checkStatus(429, matches: "quota")
+    await checkStatus(500, matches: "unavailable")
+    // Network failure
+    StubURLProtocol.requestHandler = { _ in throw URLError(.notConnectedToInternet) }
+    do {
+        _ = try await engine.transcribe(audioData: geminiAudio, language: nil, prompt: nil)
+        assert(false, "Expected networkError")
+    } catch let err as STTError {
+        if case .networkError = err {
+        } else {
+            assert(false, "Expected networkError case")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    // Empty audio makes no network call
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        (geminiHTTPResponse(url: request.url!, status: 200), Data())
+    }
+    do {
+        _ = try await engine.transcribe(audioData: Data(), language: nil, prompt: nil)
+        assert(false, "Expected emptyAudioData")
+    } catch let err as STTError {
+        assert(err == .emptyAudioData, "Expected emptyAudioData")
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    assert(StubURLProtocol.requestCount == 0, "Empty audio must make no network call")
+    // Missing key surfaces distinct auth error
+    let keyless = GeminiSTTEngine(config: GeminiSTTConfig(apiKey: nil), session: session)
+    do {
+        _ = try await keyless.transcribe(audioData: geminiAudio, language: nil, prompt: nil)
+        assert(false, "Expected missing-key auth error")
+    } catch let err as STTError {
+        if case .httpError(let code, let msg) = err {
+            assert(code == 401, "Missing key must be 401")
+            assert(msg.contains("API key"), "Missing key message mismatch")
+        } else {
+            assert(false, "Wrong error for missing key")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+}
+
+await testGeminiErrors()
+print("✔ GeminiSTTEngine error taxonomy verified")
+
+// Test 26: Coordinator factory maps Gemini mode with isolated keys
+@MainActor
+func testGeminiFactory() async {
+    let suite = "test.gemini.factory.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.set(STTProviderMode.gemini.rawValue, forKey: "stt_provider_mode")
+    defaults.set("AIza-gemini-secret", forKey: "gemini_api_key")
+    defaults.set("gemini-3.5-transcribe", forKey: "gemini_model")
+    defaults.set("gsk-groq-secret", forKey: "stt_api_key")
+    let built = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(built.identifier == "gemini.gemini-3.5-transcribe", "Factory identifier mismatch: \(built.identifier)")
+    assert(built.isLocal == false, "Factory Gemini must be remote")
+    let geminiBuilt = built as! GeminiSTTEngine
+    assert(geminiBuilt.config.apiKey == "AIza-gemini-secret", "Factory must use isolated gemini key, not Groq key")
+    // Default model fallback
+    defaults.removeObject(forKey: "gemini_model")
+    let defaulted = DictationCoordinator.makeEngineFromPreferences(defaults: defaults) as! GeminiSTTEngine
+    assert(defaulted.config.model == "gemini-3.5-transcribe", "Factory default model mismatch")
+    // Existing modes unchanged
+    defaults.set(STTProviderMode.remote.rawValue, forKey: "stt_provider_mode")
+    let remote = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(remote.identifier == "remote.whisper-large-v3-turbo" || remote.identifier.hasPrefix("remote."), "Remote factory broke: \(remote.identifier)")
+    defaults.removePersistentDomain(forName: suite)
+}
+
+await testGeminiFactory()
+print("✔ DictationCoordinator Gemini factory mapping verified")
+
+if ProcessInfo.processInfo.environment["KANSO_LIVE_GEMINI"] == "1" {
+    let liveKey = ProcessInfo.processInfo.environment["GEMINI_API_KEY"] ?? ""
+    assert(!liveKey.isEmpty, "GEMINI_API_KEY required for live check")
+    let live = GeminiSTTEngine(config: GeminiSTTConfig(apiKey: liveKey))
+    let clip = WAVWriter.createWAVData(from: Array(repeating: Float(0.1), count: 16_000), sampleRate: 16_000, channels: 1)
+    let liveResult = try await live.transcribe(audioData: clip, language: "en", prompt: nil)
+    print("✔ Live Gemini check: [\(liveResult.text)]")
+} else {
+    print("○ Live Gemini check skipped (set KANSO_LIVE_GEMINI=1 + GEMINI_API_KEY to run)")
+}
 print("All KansoCore tests passed successfully! 🎉")

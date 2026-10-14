@@ -9,6 +9,8 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var modelName: String
     @Published public var modelVariant: String
     @Published public var cacheDirectory: String
+    @Published public var geminiApiKey: String
+    @Published public var geminiModel: String
     @Published public var isAccessibilityGranted: Bool
 
     public var onSettingsChanged: (@MainActor () -> Void)?
@@ -22,6 +24,8 @@ public final class SettingsViewModel: ObservableObject {
         self.modelName = UserDefaults.standard.string(forKey: "stt_model") ?? "whisper-large-v3-turbo"
         self.modelVariant = UserDefaults.standard.string(forKey: "whisperkit_model_variant") ?? "openai_whisper-base"
         self.cacheDirectory = UserDefaults.standard.string(forKey: "whisperkit_cache_directory") ?? WhisperKitConfig.defaultDownloadBase.path
+        self.geminiApiKey = UserDefaults.standard.string(forKey: "gemini_api_key") ?? ""
+        self.geminiModel = UserDefaults.standard.string(forKey: "gemini_model") ?? GeminiSTTConfig.defaultModel
         self.isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
     }
 
@@ -32,6 +36,8 @@ public final class SettingsViewModel: ObservableObject {
         UserDefaults.standard.set(modelName, forKey: "stt_model")
         UserDefaults.standard.set(modelVariant, forKey: "whisperkit_model_variant")
         UserDefaults.standard.set(cacheDirectory, forKey: "whisperkit_cache_directory")
+        UserDefaults.standard.set(geminiApiKey, forKey: "gemini_api_key")
+        UserDefaults.standard.set(geminiModel, forKey: "gemini_model")
         onSettingsChanged?()
     }
 
@@ -77,6 +83,7 @@ public struct SettingsView: View {
                 Picker("Provider Mode:", selection: $viewModel.providerMode) {
                     Text("Remote (OpenAI-Compatible)").tag(STTProviderMode.remote)
                     Text("Local (WhisperKit CoreML)").tag(STTProviderMode.local)
+                    Text("Gemini (Free Tier)").tag(STTProviderMode.gemini)
                 }
                 .pickerStyle(.segmented)
                 .onChange(of: viewModel.providerMode) { viewModel.save() }
@@ -95,6 +102,18 @@ public struct SettingsView: View {
                         .onChange(of: viewModel.modelName) { viewModel.save() }
 
                     Text("Supports Groq, OpenAI, Ollama, and self-hosted vLLM endpoints.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else if viewModel.providerMode == .gemini {
+                    SecureField("API Key (Gemini AI Studio):", text: $viewModel.geminiApiKey)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.geminiApiKey) { viewModel.save() }
+
+                    TextField("Model Name:", text: $viewModel.geminiModel)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.geminiModel) { viewModel.save() }
+
+                    Text("Cloud transcription via Gemini Developer API free tier (rate-limited daily requests). Audio leaves the device, unlike Local mode.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 } else {
