@@ -150,6 +150,7 @@ public struct KansoDictateApp: App {
             Text(statusMessage)
                 .font(.headline)
                 .help(statusMessage)
+                .onAppear { hotkeyStatus.refresh() }
 
             Text("Engine: \(coordinator.activeEngine.displayName)")
                 .font(.caption)
@@ -195,9 +196,6 @@ public struct KansoDictateApp: App {
                 eventTapManager.resyncModifierState()
                 hotkeyStatus.refresh()
             }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
-            hotkeyStatus.refresh()
         }
     }
 }
