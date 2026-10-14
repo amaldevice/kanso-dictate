@@ -11,6 +11,8 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var cacheDirectory: String
     @Published public var geminiApiKey: String
     @Published public var geminiModel: String
+    @Published public var deepgramApiKey: String
+    @Published public var deepgramModel: String
     @Published public var isAccessibilityGranted: Bool
 
     public var onSettingsChanged: (@MainActor () -> Void)?
@@ -26,6 +28,8 @@ public final class SettingsViewModel: ObservableObject {
         self.cacheDirectory = UserDefaults.standard.string(forKey: "whisperkit_cache_directory") ?? WhisperKitConfig.defaultDownloadBase.path
         self.geminiApiKey = UserDefaults.standard.string(forKey: "gemini_api_key") ?? ""
         self.geminiModel = UserDefaults.standard.string(forKey: "gemini_model") ?? GeminiSTTConfig.defaultModel
+        self.deepgramApiKey = UserDefaults.standard.string(forKey: "deepgram_api_key") ?? ""
+        self.deepgramModel = UserDefaults.standard.string(forKey: "deepgram_model") ?? DeepgramSTTConfig.defaultModel
         self.isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
     }
 
@@ -38,6 +42,8 @@ public final class SettingsViewModel: ObservableObject {
         UserDefaults.standard.set(cacheDirectory, forKey: "whisperkit_cache_directory")
         UserDefaults.standard.set(geminiApiKey, forKey: "gemini_api_key")
         UserDefaults.standard.set(geminiModel, forKey: "gemini_model")
+        UserDefaults.standard.set(deepgramApiKey, forKey: "deepgram_api_key")
+        UserDefaults.standard.set(deepgramModel, forKey: "deepgram_model")
         onSettingsChanged?()
     }
 
@@ -84,6 +90,7 @@ public struct SettingsView: View {
                     Text("Remote (OpenAI-Compatible)").tag(STTProviderMode.remote)
                     Text("Local (WhisperKit CoreML)").tag(STTProviderMode.local)
                     Text("Gemini (Free Tier)").tag(STTProviderMode.gemini)
+                    Text("Deepgram (Free Tier)").tag(STTProviderMode.deepgram)
                 }
                 .pickerStyle(.segmented)
                 .onChange(of: viewModel.providerMode) { viewModel.save() }
@@ -114,6 +121,18 @@ public struct SettingsView: View {
                         .onChange(of: viewModel.geminiModel) { viewModel.save() }
 
                     Text("Cloud transcription via Gemini Developer API free tier (rate-limited daily requests). Audio leaves the device, unlike Local mode.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else if viewModel.providerMode == .deepgram {
+                    SecureField("API Key (Deepgram Console):", text: $viewModel.deepgramApiKey)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.deepgramApiKey) { viewModel.save() }
+
+                    TextField("Model Name:", text: $viewModel.deepgramModel)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.deepgramModel) { viewModel.save() }
+
+                    Text("Cloud transcription via Deepgram $200 credit (no card). Audio leaves the device, unlike Local mode.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 } else {

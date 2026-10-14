@@ -590,7 +590,7 @@ func testDynamicEngineSwitching() async {
     let suiteName = "test.dictation.switching.\(UUID().uuidString)"
     let testDefaults = UserDefaults(suiteName: suiteName)!
     // Verify STTProviderMode enum
-    assert(STTProviderMode.allCases == [.remote, .local, .gemini])
+    assert(STTProviderMode.allCases == [.remote, .local, .gemini, .deepgram])
     assert(STTProviderMode.remote.rawValue == "remote")
     assert(STTProviderMode.local.rawValue == "local")
     assert(STTProviderMode(rawValue: "remote") == .remote)
@@ -1063,5 +1063,177 @@ if ProcessInfo.processInfo.environment["KANSO_LIVE_GEMINI"] == "1" {
     print("✔ Live Gemini check: [\(liveResult.text)]")
 } else {
     print("○ Live Gemini check skipped (set KANSO_LIVE_GEMINI=1 + GEMINI_API_KEY to run)")
+}
+// Test 27: DeepgramSTTEngine request shape (Token auth, WAV bytes, query params)
+let deepgramConfig = DeepgramSTTConfig(apiKey: "dg-test-key", model: "nova-3")
+let deepgramEngine = DeepgramSTTEngine(config: deepgramConfig)
+assert(deepgramEngine.identifier == "deepgram.nova-3", "Deepgram identifier mismatch: \(deepgramEngine.identifier)")
+assert(deepgramEngine.isLocal == false, "Deepgram must be remote (isLocal == false)")
+assert(DeepgramSTTConfig.defaultModel == "nova-3", "Default model mismatch")
+let deepgramAudio = Data([0x52, 0x49, 0x46, 0x46, 0x00, 0x01, 0x02, 0x03])
+let dgRequest = try deepgramEngine.buildRequest(audioData: deepgramAudio, language: "id", prompt: "Kanso, Whisper")
+assert(dgRequest.httpMethod == "POST", "Deepgram must be POST")
+let dgURL = dgRequest.url!
+assert(dgURL.host == "api.deepgram.com", "Deepgram host mismatch")
+assert(dgURL.path == "/v1/listen", "Deepgram path mismatch")
+let dgQuery = dgURL.query ?? ""
+assert(dgQuery.contains("model=nova-3"), "Missing model param: \(dgQuery)")
+assert(dgQuery.contains("language=id"), "Missing language param: \(dgQuery)")
+assert(dgQuery.contains("smart_format=true"), "Missing smart_format param: \(dgQuery)")
+assert(dgQuery.contains("keywords=Kanso") && dgQuery.contains("keywords=Whisper"), "Prompt must map to keywords params: \(dgQuery)")
+assert(dgRequest.value(forHTTPHeaderField: "Authorization") == "Token dg-test-key", "Deepgram must use Token auth scheme")
+assert(dgRequest.value(forHTTPHeaderField: "Content-Type") == "audio/wav", "Deepgram Content-Type mismatch")
+assert(dgRequest.httpBody == deepgramAudio, "Deepgram body must be raw WAV bytes")
+// Unset language falls back to multi; empty prompt sends no keywords
+let dgBare = try deepgramEngine.buildRequest(audioData: deepgramAudio, language: nil, prompt: nil)
+assert((dgBare.url!.query ?? "").contains("language=multi"), "Unset language must fall back to multi")
+assert(!((dgBare.url!.query ?? "").contains("keywords=")), "Empty prompt must omit keywords")
+let dgEn = try deepgramEngine.buildRequest(audioData: deepgramAudio, language: "en", prompt: nil)
+assert((dgEn.url!.query ?? "").contains("language=en"), "English hint mismatch")
+print("✔ DeepgramSTTEngine request shape verified")
+
+// Test 28: Deepgram success parse incl. trim + duration fallback
+@MainActor
+func testDeepgramSuccess() async throws {
+    let session = makeGeminiStubSession()
+    let engine = DeepgramSTTEngine(config: DeepgramSTTConfig(apiKey: "dg-test-key"), session: session)
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        assert(request.value(forHTTPHeaderField: "Authorization") == "Token dg-test-key", "Stub must see Token auth")
+        return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"results\":{\"channels\":[{\"alternatives\":[{\"transcript\":\"  halo dunia  \"}]}]},\"metadata\":{\"duration\":2.5}}".utf8))
+    }
+    let res = try await engine.transcribe(audioData: deepgramAudio, language: "id", prompt: nil)
+    assert(res.text == "halo dunia", "Trim mismatch: [\(res.text)]")
+    assert(abs(res.durationSeconds - 2.5) < 0.001, "Duration mismatch")
+    assert(res.engineIdentifier == "deepgram.nova-3", "Engine badge mismatch")
+    assert(StubURLProtocol.requestCount == 1, "Must make exactly one listen call")
+    // Duration fallback when server omits metadata
+    StubURLProtocol.requestHandler = { request in
+        (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"results\":{\"channels\":[{\"alternatives\":[{\"transcript\":\"hello\"}]}]}}".utf8))
+    }
+    let res2 = try await engine.transcribe(audioData: deepgramAudio, language: "en", prompt: nil)
+    assert(res2.text == "hello", "Fallback text mismatch")
+    assert(res2.durationSeconds >= 0, "Fallback duration must be measured")
+}
+
+try await testDeepgramSuccess()
+print("✔ DeepgramSTTEngine success parse verified")
+
+// Test 29: Deepgram error taxonomy (400/401/403/429/5xx/network/empty-audio)
+@MainActor
+func testDeepgramErrors() async {
+    let session = makeGeminiStubSession()
+    let engine = DeepgramSTTEngine(config: DeepgramSTTConfig(apiKey: "dg-test-key"), session: session)
+    func checkStatus(_ status: Int, matches: String) async {
+        StubURLProtocol.requestHandler = { request in
+            (geminiHTTPResponse(url: request.url!, status: status), Data("{\"err_msg\":\"server says no\"}".utf8))
+        }
+        do {
+            _ = try await engine.transcribe(audioData: deepgramAudio, language: nil, prompt: nil)
+            assert(false, "Expected httpError")
+        } catch let err as STTError {
+            if case .httpError(let code, let msg) = err {
+                assert(code == status, "Status mismatch")
+                assert(msg.lowercased().contains(matches.lowercased()), "Error message must name failure class")
+            } else {
+                assert(false, "Wrong STTError case")
+            }
+        } catch {
+            assert(false, "Unexpected error type")
+        }
+    }
+    await checkStatus(400, matches: "Invalid")
+    await checkStatus(401, matches: "API key")
+    await checkStatus(403, matches: "API key")
+    await checkStatus(429, matches: "quota")
+    await checkStatus(500, matches: "unavailable")
+    // Network failure
+    StubURLProtocol.requestHandler = { _ in throw URLError(.notConnectedToInternet) }
+    do {
+        _ = try await engine.transcribe(audioData: deepgramAudio, language: nil, prompt: nil)
+        assert(false, "Expected networkError")
+    } catch let err as STTError {
+        if case .networkError = err {
+        } else {
+            assert(false, "Expected networkError case")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    // Empty audio makes no network call
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        (geminiHTTPResponse(url: request.url!, status: 200), Data())
+    }
+    do {
+        _ = try await engine.transcribe(audioData: Data(), language: nil, prompt: nil)
+        assert(false, "Expected emptyAudioData")
+    } catch let err as STTError {
+        assert(err == .emptyAudioData, "Expected emptyAudioData")
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    assert(StubURLProtocol.requestCount == 0, "Empty audio must make no network call")
+    // Missing key surfaces distinct auth error
+    let keyless = DeepgramSTTEngine(config: DeepgramSTTConfig(apiKey: nil), session: session)
+    do {
+        _ = try await keyless.transcribe(audioData: deepgramAudio, language: nil, prompt: nil)
+        assert(false, "Expected missing-key auth error")
+    } catch let err as STTError {
+        if case .httpError(let code, let msg) = err {
+            assert(code == 401, "Missing key must be 401")
+            assert(msg.contains("API key"), "Missing key message mismatch")
+        } else {
+            assert(false, "Wrong error for missing key")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+}
+
+await testDeepgramErrors()
+print("✔ DeepgramSTTEngine error taxonomy verified")
+
+// Test 30: Coordinator factory maps Deepgram mode with isolated keys
+@MainActor
+func testDeepgramFactory() async {
+    let suite = "test.deepgram.factory.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.set(STTProviderMode.deepgram.rawValue, forKey: "stt_provider_mode")
+    defaults.set("dg-secret", forKey: "deepgram_api_key")
+    defaults.set("nova-3", forKey: "deepgram_model")
+    defaults.set("gsk-groq-secret", forKey: "stt_api_key")
+    defaults.set("AIza-gemini-secret", forKey: "gemini_api_key")
+    let built = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(built.identifier == "deepgram.nova-3", "Factory identifier mismatch: \(built.identifier)")
+    assert(built.isLocal == false, "Factory Deepgram must be remote")
+    let dgBuilt = built as! DeepgramSTTEngine
+    assert(dgBuilt.config.apiKey == "dg-secret", "Factory must use isolated deepgram key")
+    // Default model fallback
+    defaults.removeObject(forKey: "deepgram_model")
+    let defaulted = DictationCoordinator.makeEngineFromPreferences(defaults: defaults) as! DeepgramSTTEngine
+    assert(defaulted.config.model == "nova-3", "Factory default model mismatch")
+    // Existing modes unchanged
+    defaults.set(STTProviderMode.remote.rawValue, forKey: "stt_provider_mode")
+    let remote = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(remote.identifier.hasPrefix("remote."), "Remote factory broke: \(remote.identifier)")
+    defaults.set(STTProviderMode.gemini.rawValue, forKey: "stt_provider_mode")
+    let gemini = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(gemini.identifier.hasPrefix("gemini."), "Gemini factory broke: \(gemini.identifier)")
+    defaults.removePersistentDomain(forName: suite)
+}
+
+await testDeepgramFactory()
+print("✔ DictationCoordinator Deepgram factory mapping verified")
+
+if ProcessInfo.processInfo.environment["KANSO_LIVE_DEEPGRAM"] == "1" {
+    let liveKey = ProcessInfo.processInfo.environment["DEEPGRAM_API_KEY"] ?? ""
+    assert(!liveKey.isEmpty, "DEEPGRAM_API_KEY required for live check")
+    let live = DeepgramSTTEngine(config: DeepgramSTTConfig(apiKey: liveKey))
+    let clip = WAVWriter.createWAVData(from: Array(repeating: Float(0.1), count: 16_000), sampleRate: 16_000, channels: 1)
+    let liveResult = try await live.transcribe(audioData: clip, language: "en", prompt: nil)
+    print("✔ Live Deepgram check: [\(liveResult.text)]")
+} else {
+    print("○ Live Deepgram check skipped (set KANSO_LIVE_DEEPGRAM=1 + DEEPGRAM_API_KEY to run)")
 }
 print("All KansoCore tests passed successfully! 🎉")

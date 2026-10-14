@@ -94,6 +94,15 @@ public final class DictationCoordinator: ObservableObject {
                 model: trimmed.isEmpty ? GeminiSTTConfig.defaultModel : trimmed
             )
             return GeminiSTTEngine(config: config)
+        case .deepgram:
+            let apiKey = defaults.string(forKey: "deepgram_api_key")
+            let rawModel = defaults.string(forKey: "deepgram_model") ?? DeepgramSTTConfig.defaultModel
+            let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            let config = DeepgramSTTConfig(
+                apiKey: (apiKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ? apiKey : nil,
+                model: trimmed.isEmpty ? DeepgramSTTConfig.defaultModel : trimmed
+            )
+            return DeepgramSTTEngine(config: config)
         }
     }
 

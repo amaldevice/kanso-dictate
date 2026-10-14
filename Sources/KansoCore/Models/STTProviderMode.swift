@@ -5,4 +5,5 @@ public enum STTProviderMode: String, Codable, Sendable, CaseIterable {
     case remote
     case local
     case gemini
+    case deepgram
 }
