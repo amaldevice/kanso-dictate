@@ -33,6 +33,16 @@ public final class EventTapManager: @unchecked Sendable {
         return AXIsProcessTrustedWithOptions(options)
     }
 
+    /// Checks permission to observe system-wide keyboard events (Input Monitoring).
+    public static func isInputMonitoringAllowed() -> Bool {
+        CGPreflightListenEventAccess()
+    }
+
+    /// Requests Input Monitoring permission; the user must approve it in System Settings.
+    @discardableResult
+    public static func requestInputMonitoring() -> Bool {
+        CGRequestListenEventAccess()
+    }
     /// Starts listening for Option modifier transitions.
     /// If accessibility is not yet granted, starts a lightweight retry observer on the main run loop.
     @discardableResult
@@ -41,6 +51,12 @@ public final class EventTapManager: @unchecked Sendable {
         defer { lock.unlock() }
 
         guard eventTap == nil else { return true }
+
+        guard Self.isInputMonitoringAllowed() else {
+            NSLog("KansoDictate: Input Monitoring permission not granted; waiting for approval.")
+            schedulePermissionRetry()
+            return false
+        }
 
         let mask = (1 << CGEventType.flagsChanged.rawValue)
         let observerPointer = Unmanaged.passUnretained(self).toOpaque()
@@ -58,8 +74,8 @@ public final class EventTapManager: @unchecked Sendable {
             },
             userInfo: observerPointer
         ) else {
-            NSLog("KansoDictate: CGEvent.tapCreate returned nil. Scheduling Accessibility retry...")
-            scheduleAccessibilityRetry()
+            NSLog("KansoDictate: CGEvent.tapCreate returned nil; retrying permission check.")
+            schedulePermissionRetry()
             return false
         }
 
@@ -110,13 +126,13 @@ public final class EventTapManager: @unchecked Sendable {
         }
     }
 
-    private func scheduleAccessibilityRetry() {
+    private func schedulePermissionRetry() {
         guard retryTimer == nil else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.retryTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
                 guard let self = self else { return }
-                if Self.isAccessibilityTrusted(prompt: false) {
+                if Self.isInputMonitoringAllowed() && Self.isAccessibilityTrusted(prompt: false) {
                     _ = self.start()
                 }
             }

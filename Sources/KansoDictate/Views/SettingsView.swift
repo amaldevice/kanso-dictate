@@ -27,6 +27,7 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var elevenlabsModel: String
     @Published public var isAccessibilityGranted: Bool
     @Published public var isMicrophoneGranted: Bool
+    @Published public var isInputMonitoringGranted: Bool
     public var onSettingsChanged: (@MainActor () -> Void)?
     public init(onSettingsChanged: (@MainActor () -> Void)? = nil) {
         self.onSettingsChanged = onSettingsChanged
@@ -53,6 +54,7 @@ public final class SettingsViewModel: ObservableObject {
         self.elevenlabsModel = UserDefaults.standard.string(forKey: "elevenlabs_model") ?? ElevenLabsSTTConfig.defaultModel
         self.isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
         self.isMicrophoneGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        self.isInputMonitoringGranted = EventTapManager.isInputMonitoringAllowed()
     }
 
     public func save() {
@@ -88,14 +90,14 @@ public final class SettingsViewModel: ObservableObject {
     public func refreshPermissions() {
         isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
         isMicrophoneGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        isInputMonitoringGranted = EventTapManager.isInputMonitoringAllowed()
     }
 
-    public func requestPermissions() {
-        _ = EventTapManager.isAccessibilityTrusted(prompt: true)
-        AVCaptureDevice.requestAccess(for: .audio) { _ in
-            Task { @MainActor in self.refreshPermissions() }
+
+    public func openInputMonitoringSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
+            NSWorkspace.shared.open(url)
         }
-        refreshPermissions()
     }
 
     public func openSystemSettings() {
@@ -104,17 +106,6 @@ public final class SettingsViewModel: ObservableObject {
         }
     }
 
-    /// Re-checks trust then relaunches so the new process picks up the grant.
-    public func refreshAndRelaunch() {
-        refreshPermissions()
-        guard isAccessibilityGranted else { return }
-        let appURL = Bundle.main.bundleURL
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        task.arguments = [appURL.path]
-        try? task.run()
-        NSApplication.shared.terminate(nil)
-    }
 }
 
 public struct SettingsView: View {
@@ -326,25 +317,44 @@ public struct SettingsView: View {
 
                     Spacer()
 
-                    if viewModel.isAccessibilityGranted {
-                        Button("Open System Settings") {
-                            viewModel.openSystemSettings()
-                        }
-                    } else {
-                        Button("Refresh Status") {
-                            viewModel.refreshPermissions()
-                        }
+                    Button("Open System Settings") {
+                        viewModel.openSystemSettings()
+                    }
+                    if !viewModel.isAccessibilityGranted {
                         Button("Grant Access") {
-                            viewModel.requestPermissions()
+                            _ = EventTapManager.isAccessibilityTrusted(prompt: true)
                         }
-                        Button("Relaunch App") {
-                            viewModel.refreshAndRelaunch()
-                        }
-                        .disabled(!viewModel.isAccessibilityGranted)
                     }
                 }
 
-                Text(viewModel.isAccessibilityGranted ? "Granted — Option hotkey active. If keys stop responding, reopen Settings to resync." : "Required for Push-To-Talk key interception and synthetic paste into active apps. After toggling ON, return here to resync.")
+                Text("Required for controlling apps and synthetic paste. Global hotkey also requires Input Monitoring.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                HStack {
+                    Label(
+                        "Input Monitoring — \(viewModel.isInputMonitoringGranted ? "Granted" : "Not Granted")",
+                        systemImage: viewModel.isInputMonitoringGranted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                    )
+                    .foregroundColor(viewModel.isInputMonitoringGranted ? .green : .orange)
+
+                    Spacer()
+
+                    Button("Refresh Status") {
+                        viewModel.refreshPermissions()
+                    }
+                    if !viewModel.isInputMonitoringGranted {
+                        Button("Request Access") {
+                            _ = EventTapManager.requestInputMonitoring()
+                            viewModel.refreshPermissions()
+                        }
+                    }
+                    Button("Open System Settings") {
+                        viewModel.openInputMonitoringSettings()
+                    }
+                }
+
+                Text(viewModel.isInputMonitoringGranted ? "Granted — global Option key monitoring is authorized." : "Required to detect Option globally. Enable Kanso Dictate under System Settings → Privacy & Security → Input Monitoring.")
                     .font(.caption)
                     .foregroundColor(.secondary)
 
@@ -359,7 +369,9 @@ public struct SettingsView: View {
 
                     if !viewModel.isMicrophoneGranted {
                         Button("Grant Access") {
-                            viewModel.requestPermissions()
+                            AVCaptureDevice.requestAccess(for: .audio) { _ in
+                                Task { @MainActor in viewModel.refreshPermissions() }
+                            }
                         }
                     }
                 }

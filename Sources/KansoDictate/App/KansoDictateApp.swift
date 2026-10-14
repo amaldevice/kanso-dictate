@@ -59,10 +59,16 @@ public final class WindowManager: ObservableObject {
 
 @MainActor
 public final class HotkeyStatus: ObservableObject {
-    @Published public var isActive = EventTapManager.isAccessibilityTrusted(prompt: false)
+    @Published public var isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
+    @Published public var isInputMonitoringGranted = EventTapManager.isInputMonitoringAllowed()
+    public var isActive: Bool { isAccessibilityGranted && isInputMonitoringGranted }
     public init() {}
-    public func refresh() { isActive = EventTapManager.isAccessibilityTrusted(prompt: false) }
+    public func refresh() {
+        isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
+        isInputMonitoringGranted = EventTapManager.isInputMonitoringAllowed()
+    }
 }
+
 
 public struct KansoDictateApp: App {
     @StateObject private var coordinator: DictationCoordinator
@@ -156,7 +162,9 @@ public struct KansoDictateApp: App {
                 .font(.caption)
                 .foregroundColor(.secondary)
             if !hotkeyStatus.isActive {
-                Text("⚠️ Option hotkey OFF — grant Accessibility in Settings")
+                Text(hotkeyStatus.isInputMonitoringGranted
+                     ? "⚠️ Option hotkey OFF — grant Accessibility in Settings"
+                     : "⚠️ Option hotkey OFF — grant Input Monitoring in Settings")
                     .font(.caption)
                     .foregroundColor(.orange)
             }

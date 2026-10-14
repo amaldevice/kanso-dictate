@@ -96,7 +96,7 @@ Commercial tools like Wispr Flow and Superwhisper wrap 120MB+ Electron container
 1. Download the latest release archive (`Kanso-Dictate-v0.1.0-macos-arm64.zip`) from [Releases](https://github.com/amaldevice/kanso-dictate/releases).
 2. Unzip and drag `Kanso Dictate.app` into `/Applications`.
 3. Open **Kanso Dictate** via Spotlight (`Cmd + Space`).
-4. Click the Menu Bar icon $\to$ **Settings...** $\to$ click **Grant Access** to enable macOS Accessibility permissions in System Settings (required for hotkey detection and text insertion).
+4. Open **Settings...** from the menu bar. Enable **Accessibility** for app control/text insertion and **Input Monitoring** for the global Option hotkey under System Settings → Privacy & Security; refresh status in Settings.
 
 ### Option 2: Build from Source (1-Line Local Install)
 
