@@ -35,6 +35,12 @@ public final class SettingsViewModel: ObservableObject {
         onSettingsChanged?()
     }
 
+    public func applyPreset(_ preset: STTRemotePreset) {
+        baseURL = preset.baseURL.absoluteString
+        modelName = preset.model
+        save()
+    }
+
     public func refreshPermissions() {
         isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
     }
@@ -104,6 +110,15 @@ public struct SettingsView: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
+            }
+
+            Section("Remote Presets") {
+                ForEach(STTRemotePreset.allCases, id: \.self) { preset in
+                    Button(preset.displayName) { viewModel.applyPreset(preset) }
+                }
+                Text("Voxtral ~$0.003/min, Fireworks turbo ~$0.0009/min ($1 credit), Together Whisper ~$0.0015/min. Fills Base URL + Model; use your own key.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
 
             Section("Push-To-Talk Hotkey") {

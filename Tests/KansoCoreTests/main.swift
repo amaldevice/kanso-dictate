@@ -817,4 +817,30 @@ func testEndToEndWalkingSkeleton() async {
 
 await testEndToEndWalkingSkeleton()
 print("✔ End-to-End Walking Skeleton integration test verified")
+
+// Test 23: STTRemotePreset resolution (Track 0 presets)
+assert(STTRemotePreset.allCases.count == 3, "Expected 3 remote presets")
+assert(STTRemotePreset.voxtral.baseURL.absoluteString == "https://api.mistral.ai/v1", "Voxtral baseURL mismatch")
+assert(STTRemotePreset.voxtral.model == "voxtral-mini-latest", "Voxtral model mismatch")
+assert(STTRemotePreset.fireworks.baseURL.absoluteString == "https://api.fireworks.ai/inference/v1", "Fireworks baseURL mismatch")
+assert(STTRemotePreset.fireworks.model == "whisper-v3-turbo", "Fireworks model mismatch")
+assert(STTRemotePreset.together.baseURL.absoluteString == "https://api.together.xyz/v1", "Together baseURL mismatch")
+assert(STTRemotePreset.together.model == "openai/whisper-large-v3", "Together model mismatch")
+let voxtralCfg = STTRemotePreset.voxtral.makeConfig(apiKey: "test-key")
+assert(voxtralCfg.baseURL == STTRemotePreset.voxtral.baseURL, "Preset config baseURL mismatch")
+assert(voxtralCfg.model == "voxtral-mini-latest", "Preset config model mismatch")
+assert(voxtralCfg.apiKey == "test-key", "Preset config apiKey mismatch")
+print("✔ STTRemotePreset resolution verified")
+
+// Test 24: Preset request shape at the Speech-to-Text Engine seam
+let presetEngine = OpenAICompatibleSTTEngine(config: STTRemotePreset.fireworks.makeConfig(apiKey: "fw-test"))
+assert(presetEngine.endpointURL.absoluteString == "https://api.fireworks.ai/inference/v1/audio/transcriptions", "Preset endpoint mismatch")
+let presetReq = try presetEngine.buildRequest(audioData: mockAudio, language: "id", prompt: nil, boundary: fixedBoundary)
+assert(presetReq.value(forHTTPHeaderField: "Authorization") == "Bearer fw-test", "Preset auth header mismatch")
+guard let presetBody = presetReq.httpBody, let presetStr = String(data: presetBody, encoding: .utf8) else {
+    fatalError("Failed to decode preset HTTP body")
+}
+assert(presetStr.contains("name=\"model\"\r\n\r\nwhisper-v3-turbo"), "Preset model missing in body")
+assert(presetStr.contains("name=\"language\"\r\n\r\nid"), "Preset language missing in body")
+print("✔ Preset request shape at STT seam verified")
 print("All KansoCore tests passed successfully! 🎉")
