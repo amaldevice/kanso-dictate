@@ -42,12 +42,12 @@ public final class WindowManager: ObservableObject {
         }
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 440),
-            styleMask: [.titled, .closable, .miniaturizable],
+            contentRect: NSRect(x: 0, y: 0, width: 500, height: 560),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
-        window.center()
+        window.minSize = NSSize(width: 460, height: 420)
         window.title = "Kanso Dictate - Settings"
         window.contentView = NSHostingView(rootView: SettingsView(coordinator: activeCoordinator))
         window.isReleasedWhenClosed = false

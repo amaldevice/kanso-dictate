@@ -114,22 +114,23 @@ public struct SettingsView: View {
     }
 
     public var body: some View {
-        Form {
-            Section("Speech-to-Text Provider") {
-                Picker("Provider Mode:", selection: $viewModel.providerMode) {
-                    Text("Remote (OpenAI-Compatible)").tag(STTProviderMode.remote)
-                    Text("Local (WhisperKit CoreML)").tag(STTProviderMode.local)
-                    Text("Gemini (Free Tier)").tag(STTProviderMode.gemini)
-                    Text("Deepgram (Free Tier)").tag(STTProviderMode.deepgram)
-                    Text("Cloudflare (Free Tier)").tag(STTProviderMode.cloudflare)
-                    Text("AssemblyAI ($50)").tag(STTProviderMode.assemblyai)
-                    Text("Speechmatics ($100)").tag(STTProviderMode.speechmatics)
-                    Text("Rev.ai (5h)").tag(STTProviderMode.revai)
-                    Text("ElevenLabs").tag(STTProviderMode.elevenlabs)
-                }
-                .pickerStyle(.segmented)
-                .onChange(of: viewModel.providerMode) { viewModel.save() }
-
+        ScrollView {
+            Form {
+                Section("Speech-to-Text Provider") {
+                    Picker("Provider:", selection: $viewModel.providerMode) {
+                        Text("Remote (OpenAI-Compatible)").tag(STTProviderMode.remote)
+                        Text("Local (WhisperKit CoreML)").tag(STTProviderMode.local)
+                        Divider()
+                        Text("Gemini (Free Tier)").tag(STTProviderMode.gemini)
+                        Text("Deepgram (Free Tier)").tag(STTProviderMode.deepgram)
+                        Text("Cloudflare (Free Tier)").tag(STTProviderMode.cloudflare)
+                        Text("AssemblyAI ($50 Credit)").tag(STTProviderMode.assemblyai)
+                        Text("Speechmatics ($100 Grant)").tag(STTProviderMode.speechmatics)
+                        Text("Rev.ai (5h Trial)").tag(STTProviderMode.revai)
+                        Text("ElevenLabs").tag(STTProviderMode.elevenlabs)
+                    }
+                    .pickerStyle(.menu)
+                    .onChange(of: viewModel.providerMode) { viewModel.save() }
                 if viewModel.providerMode == .remote {
                     Picker("Preset:", selection: Binding(
                         get: { "custom" },
@@ -258,14 +259,21 @@ public struct SettingsView: View {
                         .foregroundColor(.secondary)
                 }
             }
-
-            Section("Remote Presets") {
-                ForEach(STTRemotePreset.allCases, id: \.self) { preset in
-                    Button(preset.displayName) { viewModel.applyPreset(preset) }
+            if viewModel.providerMode == .remote {
+                Section("Quick Presets") {
+                    HStack {
+                        Text("Popular Endpoints:")
+                        Spacer()
+                        Menu("Select Preset...") {
+                            ForEach(STTRemotePreset.allCases, id: \.self) { preset in
+                                Button(preset.displayName) { viewModel.applyPreset(preset) }
+                            }
+                        }
+                    }
+                    Text("Auto-fills Base URL and Model for Voxtral, Fireworks, Together, Groq, etc.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
-                Text("Voxtral ~$0.003/min, Fireworks turbo ~$0.0009/min ($1 credit), Together Whisper ~$0.0015/min. Fills Base URL + Model; use your own key.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
             }
 
             Section("Push-To-Talk Hotkey") {
@@ -307,7 +315,8 @@ public struct SettingsView: View {
             }
         }
         .padding()
-        .frame(minWidth: 420, minHeight: 420)
+        }
+        .frame(minWidth: 480, minHeight: 460)
         .onAppear {
             viewModel.refreshPermissions()
         }
