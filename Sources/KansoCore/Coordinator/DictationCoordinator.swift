@@ -77,14 +77,77 @@ public final class DictationCoordinator: ObservableObject {
             return WhisperKitEngine(config: config)
         case .remote:
             let baseURLStr = defaults.string(forKey: "stt_base_url") ?? "https://api.groq.com/openai/v1"
-            let apiKey = defaults.string(forKey: "stt_api_key")
-            let model = defaults.string(forKey: "stt_model") ?? "whisper-large-v3-turbo"
+            let rawKey = defaults.string(forKey: "stt_api_key")?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let rawModel = defaults.string(forKey: "stt_model") ?? "whisper-large-v3-turbo"
+            let trimmedModel = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
             let config = OpenAICompatibleConfig(
                 baseURL: URL(string: baseURLStr) ?? URL(string: "https://api.groq.com/openai/v1")!,
-                apiKey: (apiKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ? apiKey : nil,
-                model: model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "whisper-large-v3-turbo" : model
+                apiKey: (rawKey?.isEmpty == false) ? rawKey : nil,
+                model: trimmedModel.isEmpty ? "whisper-large-v3-turbo" : trimmedModel
             )
             return OpenAICompatibleSTTEngine(config: config)
+        case .gemini:
+            let rawKey = defaults.string(forKey: "gemini_api_key")?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let rawModel = defaults.string(forKey: "gemini_model") ?? GeminiSTTConfig.defaultModel
+            let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            let config = GeminiSTTConfig(
+                apiKey: (rawKey?.isEmpty == false) ? rawKey : nil,
+                model: trimmed.isEmpty ? GeminiSTTConfig.defaultModel : trimmed
+            )
+            return GeminiSTTEngine(config: config)
+        case .deepgram:
+            let rawKey = defaults.string(forKey: "deepgram_api_key")?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let rawModel = defaults.string(forKey: "deepgram_model") ?? DeepgramSTTConfig.defaultModel
+            let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            let config = DeepgramSTTConfig(
+                apiKey: (rawKey?.isEmpty == false) ? rawKey : nil,
+                model: trimmed.isEmpty ? DeepgramSTTConfig.defaultModel : trimmed
+            )
+            return DeepgramSTTEngine(config: config)
+        case .cloudflare:
+            let rawAccountID = defaults.string(forKey: "cloudflare_account_id")?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let rawToken = defaults.string(forKey: "cloudflare_api_token")?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let config = CloudflareSTTConfig(
+                accountID: (rawAccountID?.isEmpty == false) ? rawAccountID : nil,
+                apiToken: (rawToken?.isEmpty == false) ? rawToken : nil
+            )
+            return CloudflareSTTEngine(config: config)
+        case .assemblyai:
+            let rawKey = defaults.string(forKey: "assemblyai_api_key")?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let rawModel = defaults.string(forKey: "assemblyai_model") ?? AssemblyAISTTConfig.defaultModel
+            let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            let config = AssemblyAISTTConfig(
+                apiKey: (rawKey?.isEmpty == false) ? rawKey : nil,
+                model: trimmed.isEmpty ? AssemblyAISTTConfig.defaultModel : trimmed
+            )
+            return AssemblyAISTTEngine(config: config)
+        case .speechmatics:
+            let rawKey = defaults.string(forKey: "speechmatics_api_key")?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let rawModel = defaults.string(forKey: "speechmatics_model") ?? SpeechmaticsSTTConfig.defaultModel
+            let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            let config = SpeechmaticsSTTConfig(
+                apiKey: (rawKey?.isEmpty == false) ? rawKey : nil,
+                model: trimmed.isEmpty ? SpeechmaticsSTTConfig.defaultModel : trimmed
+            )
+            return SpeechmaticsSTTEngine(config: config)
+        case .revai:
+            let rawKey = defaults.string(forKey: "revai_api_key")?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let rawModel = defaults.string(forKey: "revai_model") ?? RevAISTTConfig.defaultModel
+            let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            let config = RevAISTTConfig(
+                apiKey: (rawKey?.isEmpty == false) ? rawKey : nil,
+                model: trimmed.isEmpty ? RevAISTTConfig.defaultModel : trimmed
+            )
+            return RevAISTTEngine(config: config)
+        case .elevenlabs:
+            let rawKey = defaults.string(forKey: "elevenlabs_api_key")?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let rawModel = defaults.string(forKey: "elevenlabs_model") ?? ElevenLabsSTTConfig.defaultModel
+            let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            let config = ElevenLabsSTTConfig(
+                apiKey: (rawKey?.isEmpty == false) ? rawKey : nil,
+                model: trimmed.isEmpty ? ElevenLabsSTTConfig.defaultModel : trimmed
+            )
+            return ElevenLabsSTTEngine(config: config)
         }
     }
 

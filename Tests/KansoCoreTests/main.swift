@@ -590,7 +590,7 @@ func testDynamicEngineSwitching() async {
     let suiteName = "test.dictation.switching.\(UUID().uuidString)"
     let testDefaults = UserDefaults(suiteName: suiteName)!
     // Verify STTProviderMode enum
-    assert(STTProviderMode.allCases == [.remote, .local])
+    assert(STTProviderMode.allCases == [.remote, .local, .gemini, .deepgram, .cloudflare, .assemblyai, .speechmatics, .revai, .elevenlabs])
     assert(STTProviderMode.remote.rawValue == "remote")
     assert(STTProviderMode.local.rawValue == "local")
     assert(STTProviderMode(rawValue: "remote") == .remote)
@@ -817,4 +817,1443 @@ func testEndToEndWalkingSkeleton() async {
 
 await testEndToEndWalkingSkeleton()
 print("✔ End-to-End Walking Skeleton integration test verified")
+
+// Test 23: STTRemotePreset resolution (Track 0 presets)
+assert(STTRemotePreset.allCases.count == 3, "Expected 3 remote presets")
+assert(STTRemotePreset.voxtral.baseURL.absoluteString == "https://api.mistral.ai/v1", "Voxtral baseURL mismatch")
+assert(STTRemotePreset.voxtral.model == "voxtral-mini-latest", "Voxtral model mismatch")
+assert(STTRemotePreset.fireworks.baseURL.absoluteString == "https://api.fireworks.ai/inference/v1", "Fireworks baseURL mismatch")
+assert(STTRemotePreset.fireworks.model == "whisper-v3-turbo", "Fireworks model mismatch")
+assert(STTRemotePreset.together.baseURL.absoluteString == "https://api.together.xyz/v1", "Together baseURL mismatch")
+assert(STTRemotePreset.together.model == "openai/whisper-large-v3", "Together model mismatch")
+let voxtralCfg = STTRemotePreset.voxtral.makeConfig(apiKey: "test-key")
+assert(voxtralCfg.baseURL == STTRemotePreset.voxtral.baseURL, "Preset config baseURL mismatch")
+assert(voxtralCfg.model == "voxtral-mini-latest", "Preset config model mismatch")
+assert(voxtralCfg.apiKey == "test-key", "Preset config apiKey mismatch")
+print("✔ STTRemotePreset resolution verified")
+
+// Test 24: Preset request shape at the Speech-to-Text Engine seam
+let presetEngine = OpenAICompatibleSTTEngine(config: STTRemotePreset.fireworks.makeConfig(apiKey: "fw-test"))
+assert(presetEngine.endpointURL.absoluteString == "https://api.fireworks.ai/inference/v1/audio/transcriptions", "Preset endpoint mismatch")
+let presetReq = try presetEngine.buildRequest(audioData: mockAudio, language: "id", prompt: nil, boundary: fixedBoundary)
+assert(presetReq.value(forHTTPHeaderField: "Authorization") == "Bearer fw-test", "Preset auth header mismatch")
+guard let presetBody = presetReq.httpBody, let presetStr = String(data: presetBody, encoding: .utf8) else {
+    fatalError("Failed to decode preset HTTP body")
+}
+assert(presetStr.contains("name=\"model\"\r\n\r\nwhisper-v3-turbo"), "Preset model missing in body")
+assert(presetStr.contains("name=\"language\"\r\n\r\nid"), "Preset language missing in body")
+print("✔ Preset request shape at STT seam verified")
+
+// Test 23: GeminiSTTEngine request shape (Files upload + Interactions)
+let geminiConfig = GeminiSTTConfig(apiKey: "AIza-test-key", model: "gemini-3.5-transcribe")
+let geminiEngine = GeminiSTTEngine(config: geminiConfig)
+assert(geminiEngine.identifier == "gemini.gemini-3.5-transcribe", "Gemini identifier mismatch: \(geminiEngine.identifier)")
+assert(geminiEngine.isLocal == false, "Gemini must be remote (isLocal == false)")
+assert(GeminiSTTConfig.defaultModel == "gemini-3.5-transcribe", "Default model mismatch")
+let geminiAudio = Data([0x52, 0x49, 0x46, 0x46, 0x00, 0x01, 0x02, 0x03])
+let uploadRequest = try geminiEngine.buildUploadRequest(audioData: geminiAudio)
+assert(uploadRequest.httpMethod == "POST", "Upload must be POST")
+assert(uploadRequest.url?.absoluteString.contains("generativelanguage.googleapis.com") == true, "Upload host mismatch")
+assert(uploadRequest.value(forHTTPHeaderField: "x-goog-api-key") == "AIza-test-key", "Missing x-goog-api-key header")
+assert(uploadRequest.value(forHTTPHeaderField: "Content-Type") == "audio/wav", "Upload Content-Type mismatch")
+assert(uploadRequest.httpBody == geminiAudio, "Upload body must be raw WAV bytes")
+let interactRequest = try geminiEngine.buildInteractionsRequest(fileURI: "https://example.com/files/abc", language: nil, prompt: "Kanso, Whisper")
+assert(interactRequest.httpMethod == "POST", "Interactions must be POST")
+assert(interactRequest.url?.absoluteString == "https://generativelanguage.googleapis.com/v1beta/interactions", "Interactions URL mismatch")
+assert(interactRequest.value(forHTTPHeaderField: "x-goog-api-key") == "AIza-test-key", "Interactions missing API key header")
+let interactBody = try JSONSerialization.jsonObject(with: interactRequest.httpBody!) as! [String: Any]
+assert((interactBody["model"] as? String) == "gemini-3.5-transcribe", "Model mismatch in body")
+let inputs = interactBody["input"] as! [[String: Any]]
+assert((inputs[0]["audio_uri"] as? String) == "https://example.com/files/abc", "Audio URI mismatch")
+assert((inputs[0]["mime_type"] as? String) == "audio/wav", "MIME mismatch")
+let genConfig = (interactBody["generation_config"] as! [String: Any])["transcription_config"] as! [String: Any]
+assert((genConfig["mode"] as? String) == "verbatim", "Mode must be verbatim")
+assert(((genConfig["custom_vocabulary"] as? [String]) ?? []).contains("Kanso"), "Prompt must map to custom_vocabulary")
+// Empty prompt sends no custom list; unset language sends no hint
+let bareRequest = try geminiEngine.buildInteractionsRequest(fileURI: "https://example.com/files/abc", language: nil, prompt: nil)
+let bareBody = try JSONSerialization.jsonObject(with: bareRequest.httpBody!) as! [String: Any]
+let bareTC = ((bareBody["generation_config"] as! [String: Any])["transcription_config"] as! [String: Any])
+assert(bareTC["custom_vocabulary"] == nil, "Empty prompt must omit custom_vocabulary")
+assert(bareTC["language_code"] == nil, "Unset language must omit hint")
+let hintedRequest = try geminiEngine.buildInteractionsRequest(fileURI: "https://example.com/files/abc", language: "id", prompt: nil)
+let hintedBody = try JSONSerialization.jsonObject(with: hintedRequest.httpBody!) as! [String: Any]
+let hintedTC = ((hintedBody["generation_config"] as! [String: Any])["transcription_config"] as! [String: Any])
+assert((hintedTC["language_code"] as? String) == "id", "Language hint mismatch")
+print("✔ GeminiSTTEngine request shape verified")
+
+// Stub harness for Gemini transcribe()
+final class StubURLProtocol: URLProtocol, @unchecked Sendable {
+    nonisolated(unsafe) static var requestHandler: ((URLRequest) throws -> (HTTPURLResponse, Data))?
+    nonisolated(unsafe) static var requestCount = 0
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        StubURLProtocol.requestCount += 1
+        do {
+            let (response, data) = try StubURLProtocol.requestHandler!(request)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: data)
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+    override func stopLoading() {}
+}
+
+func makeGeminiStubSession() -> URLSession {
+    let config = URLSessionConfiguration.ephemeral
+    config.protocolClasses = [StubURLProtocol.self]
+    return URLSession(configuration: config)
+}
+
+func geminiHTTPResponse(url: URL, status: Int) -> HTTPURLResponse {
+    HTTPURLResponse(url: url, statusCode: status, httpVersion: nil, headerFields: nil)!
+}
+
+// Test 24: Gemini success parse incl. trim + duration fallback
+@MainActor
+func testGeminiSuccess() async throws {
+    let session = makeGeminiStubSession()
+    let engine = GeminiSTTEngine(config: GeminiSTTConfig(apiKey: "AIza-test-key"), session: session)
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        let urlStr = request.url!.absoluteString
+        if urlStr.contains("/upload/") {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"file\":{\"uri\":\"https://example.com/files/abc\"}}".utf8))
+        } else {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"output_text\":\"  halo dunia  \",\"duration\":1.2}".utf8))
+        }
+    }
+    let res = try await engine.transcribe(audioData: geminiAudio, language: nil, prompt: nil)
+    assert(res.text == "halo dunia", "Trim mismatch: [\(res.text)]")
+    assert(abs(res.durationSeconds - 1.2) < 0.001, "Duration mismatch")
+    assert(res.engineIdentifier == "gemini.gemini-3.5-transcribe", "Engine badge mismatch")
+    assert(StubURLProtocol.requestCount == 2, "Must make upload + interactions calls")
+    // Duration fallback when server omits it
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        if request.url!.absoluteString.contains("/upload/") {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"file\":{\"uri\":\"https://example.com/files/abc\"}}".utf8))
+        } else {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"output_text\":\"hello\"}".utf8))
+        }
+    }
+    let res2 = try await engine.transcribe(audioData: geminiAudio, language: "en", prompt: nil)
+    assert(res2.text == "hello", "Fallback text mismatch")
+    assert(res2.durationSeconds >= 0, "Fallback duration must be measured")
+}
+
+try await testGeminiSuccess()
+print("✔ GeminiSTTEngine success parse verified")
+
+// Test 25: Gemini error taxonomy (400/401/403/429/5xx/network/empty-audio)
+@MainActor
+func testGeminiErrors() async {
+    let session = makeGeminiStubSession()
+    let engine = GeminiSTTEngine(config: GeminiSTTConfig(apiKey: "AIza-test-key"), session: session)
+    let uploadOK = Data("{\"file\":{\"uri\":\"https://example.com/files/abc\"}}".utf8)
+    func checkStatus(_ status: Int, matches: String) async {
+        StubURLProtocol.requestHandler = { request in
+            if request.url!.absoluteString.contains("/upload/") {
+                return (geminiHTTPResponse(url: request.url!, status: 200), uploadOK)
+            }
+            return (geminiHTTPResponse(url: request.url!, status: status), Data("{\"error\":{\"message\":\"server says no\"}}".utf8))
+        }
+        do {
+            _ = try await engine.transcribe(audioData: geminiAudio, language: nil, prompt: nil)
+            assert(false, "Expected httpError")
+        } catch let err as STTError {
+            if case .httpError(let code, let msg) = err {
+                assert(code == status, "Status mismatch")
+                assert(msg.lowercased().contains(matches.lowercased()), "Error message must name failure class")
+            } else {
+                assert(false, "Wrong STTError case")
+            }
+        } catch {
+            assert(false, "Unexpected error type")
+        }
+    }
+    await checkStatus(400, matches: "Invalid")
+    await checkStatus(401, matches: "API key")
+    await checkStatus(403, matches: "API key")
+    await checkStatus(429, matches: "quota")
+    await checkStatus(500, matches: "unavailable")
+    // Network failure
+    StubURLProtocol.requestHandler = { _ in throw URLError(.notConnectedToInternet) }
+    do {
+        _ = try await engine.transcribe(audioData: geminiAudio, language: nil, prompt: nil)
+        assert(false, "Expected networkError")
+    } catch let err as STTError {
+        if case .networkError = err {
+        } else {
+            assert(false, "Expected networkError case")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    // Empty audio makes no network call
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        (geminiHTTPResponse(url: request.url!, status: 200), Data())
+    }
+    do {
+        _ = try await engine.transcribe(audioData: Data(), language: nil, prompt: nil)
+        assert(false, "Expected emptyAudioData")
+    } catch let err as STTError {
+        assert(err == .emptyAudioData, "Expected emptyAudioData")
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    assert(StubURLProtocol.requestCount == 0, "Empty audio must make no network call")
+    // Missing key surfaces distinct auth error
+    let keyless = GeminiSTTEngine(config: GeminiSTTConfig(apiKey: nil), session: session)
+    do {
+        _ = try await keyless.transcribe(audioData: geminiAudio, language: nil, prompt: nil)
+        assert(false, "Expected missing-key auth error")
+    } catch let err as STTError {
+        if case .httpError(let code, let msg) = err {
+            assert(code == 401, "Missing key must be 401")
+            assert(msg.contains("API key"), "Missing key message mismatch")
+        } else {
+            assert(false, "Wrong error for missing key")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+}
+
+await testGeminiErrors()
+print("✔ GeminiSTTEngine error taxonomy verified")
+
+// Test 26: Coordinator factory maps Gemini mode with isolated keys
+@MainActor
+func testGeminiFactory() async {
+    let suite = "test.gemini.factory.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.set(STTProviderMode.gemini.rawValue, forKey: "stt_provider_mode")
+    defaults.set("AIza-gemini-secret", forKey: "gemini_api_key")
+    defaults.set("gemini-3.5-transcribe", forKey: "gemini_model")
+    defaults.set("gsk-groq-secret", forKey: "stt_api_key")
+    let built = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(built.identifier == "gemini.gemini-3.5-transcribe", "Factory identifier mismatch: \(built.identifier)")
+    assert(built.isLocal == false, "Factory Gemini must be remote")
+    let geminiBuilt = built as! GeminiSTTEngine
+    assert(geminiBuilt.config.apiKey == "AIza-gemini-secret", "Factory must use isolated gemini key, not Groq key")
+    // Default model fallback
+    defaults.removeObject(forKey: "gemini_model")
+    let defaulted = DictationCoordinator.makeEngineFromPreferences(defaults: defaults) as! GeminiSTTEngine
+    assert(defaulted.config.model == "gemini-3.5-transcribe", "Factory default model mismatch")
+    // Existing modes unchanged
+    defaults.set(STTProviderMode.remote.rawValue, forKey: "stt_provider_mode")
+    let remote = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(remote.identifier == "remote.whisper-large-v3-turbo" || remote.identifier.hasPrefix("remote."), "Remote factory broke: \(remote.identifier)")
+    defaults.removePersistentDomain(forName: suite)
+}
+
+await testGeminiFactory()
+print("✔ DictationCoordinator Gemini factory mapping verified")
+
+if ProcessInfo.processInfo.environment["KANSO_LIVE_GEMINI"] == "1" {
+    let liveKey = ProcessInfo.processInfo.environment["GEMINI_API_KEY"] ?? ""
+    assert(!liveKey.isEmpty, "GEMINI_API_KEY required for live check")
+    let live = GeminiSTTEngine(config: GeminiSTTConfig(apiKey: liveKey))
+    let clip = WAVWriter.createWAVData(from: Array(repeating: Float(0.1), count: 16_000), sampleRate: 16_000, channels: 1)
+    let liveResult = try await live.transcribe(audioData: clip, language: "en", prompt: nil)
+    print("✔ Live Gemini check: [\(liveResult.text)]")
+} else {
+    print("○ Live Gemini check skipped (set KANSO_LIVE_GEMINI=1 + GEMINI_API_KEY to run)")
+}
+// Test 27: DeepgramSTTEngine request shape (Token auth, WAV bytes, query params)
+let deepgramConfig = DeepgramSTTConfig(apiKey: "dg-test-key", model: "nova-3")
+let deepgramEngine = DeepgramSTTEngine(config: deepgramConfig)
+assert(deepgramEngine.identifier == "deepgram.nova-3", "Deepgram identifier mismatch: \(deepgramEngine.identifier)")
+assert(deepgramEngine.isLocal == false, "Deepgram must be remote (isLocal == false)")
+assert(DeepgramSTTConfig.defaultModel == "nova-3", "Default model mismatch")
+let deepgramAudio = Data([0x52, 0x49, 0x46, 0x46, 0x00, 0x01, 0x02, 0x03])
+let dgRequest = try deepgramEngine.buildRequest(audioData: deepgramAudio, language: "id", prompt: "Kanso, Whisper")
+assert(dgRequest.httpMethod == "POST", "Deepgram must be POST")
+let dgURL = dgRequest.url!
+assert(dgURL.host == "api.deepgram.com", "Deepgram host mismatch")
+assert(dgURL.path == "/v1/listen", "Deepgram path mismatch")
+let dgQuery = dgURL.query ?? ""
+assert(dgQuery.contains("model=nova-3"), "Missing model param: \(dgQuery)")
+assert(dgQuery.contains("language=id"), "Missing language param: \(dgQuery)")
+assert(dgQuery.contains("smart_format=true"), "Missing smart_format param: \(dgQuery)")
+assert(dgQuery.contains("keywords=Kanso") && dgQuery.contains("keywords=Whisper"), "Prompt must map to keywords params: \(dgQuery)")
+assert(dgQuery.contains("topics=true"), "Prompt must enable topics bias: \(dgQuery)")
+assert(dgQuery.contains("custom_topic_mode=extended"), "Prompt must set extended custom_topic_mode: \(dgQuery)")
+assert(dgQuery.contains("custom_topic=Kanso") && dgQuery.contains("custom_topic=Whisper"), "Prompt must map to custom_topic terms: \(dgQuery)")
+assert(dgRequest.value(forHTTPHeaderField: "Authorization") == "Token dg-test-key", "Deepgram must use Token auth scheme")
+assert(dgRequest.value(forHTTPHeaderField: "Content-Type") == "audio/wav", "Deepgram Content-Type mismatch")
+assert(dgRequest.httpBody == deepgramAudio, "Deepgram body must be raw WAV bytes")
+// Unset language falls back to multi; empty prompt sends no keywords
+let dgBare = try deepgramEngine.buildRequest(audioData: deepgramAudio, language: nil, prompt: nil)
+assert((dgBare.url!.query ?? "").contains("language=multi"), "Unset language must fall back to multi")
+assert(!((dgBare.url!.query ?? "").contains("keywords=")), "Empty prompt must omit keywords")
+assert(!((dgBare.url!.query ?? "").contains("custom_topic")), "Empty prompt must omit custom_topic bias")
+assert(!((dgBare.url!.query ?? "").contains("topics=")), "Empty prompt must omit topics bias")
+let dgEn = try deepgramEngine.buildRequest(audioData: deepgramAudio, language: "en", prompt: nil)
+assert((dgEn.url!.query ?? "").contains("language=en"), "English hint mismatch")
+print("✔ DeepgramSTTEngine request shape verified")
+
+// Test 28: Deepgram success parse incl. trim + duration fallback
+@MainActor
+func testDeepgramSuccess() async throws {
+    let session = makeGeminiStubSession()
+    let engine = DeepgramSTTEngine(config: DeepgramSTTConfig(apiKey: "dg-test-key"), session: session)
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        assert(request.value(forHTTPHeaderField: "Authorization") == "Token dg-test-key", "Stub must see Token auth")
+        return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"results\":{\"channels\":[{\"alternatives\":[{\"transcript\":\"  halo dunia  \"}]}]},\"metadata\":{\"duration\":2.5}}".utf8))
+    }
+    let res = try await engine.transcribe(audioData: deepgramAudio, language: "id", prompt: nil)
+    assert(res.text == "halo dunia", "Trim mismatch: [\(res.text)]")
+    assert(abs(res.durationSeconds - 2.5) < 0.001, "Duration mismatch")
+    assert(res.engineIdentifier == "deepgram.nova-3", "Engine badge mismatch")
+    assert(StubURLProtocol.requestCount == 1, "Must make exactly one listen call")
+    // Duration fallback when server omits metadata
+    StubURLProtocol.requestHandler = { request in
+        (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"results\":{\"channels\":[{\"alternatives\":[{\"transcript\":\"hello\"}]}]}}".utf8))
+    }
+    let res2 = try await engine.transcribe(audioData: deepgramAudio, language: "en", prompt: nil)
+    assert(res2.text == "hello", "Fallback text mismatch")
+    assert(res2.durationSeconds >= 0, "Fallback duration must be measured")
+}
+
+try await testDeepgramSuccess()
+print("✔ DeepgramSTTEngine success parse verified")
+
+// Test 29: Deepgram error taxonomy (400/401/403/429/5xx/network/empty-audio)
+@MainActor
+func testDeepgramErrors() async {
+    let session = makeGeminiStubSession()
+    let engine = DeepgramSTTEngine(config: DeepgramSTTConfig(apiKey: "dg-test-key"), session: session)
+    func checkStatus(_ status: Int, matches: String) async {
+        StubURLProtocol.requestHandler = { request in
+            (geminiHTTPResponse(url: request.url!, status: status), Data("{\"err_msg\":\"server says no\"}".utf8))
+        }
+        do {
+            _ = try await engine.transcribe(audioData: deepgramAudio, language: nil, prompt: nil)
+            assert(false, "Expected httpError")
+        } catch let err as STTError {
+            if case .httpError(let code, let msg) = err {
+                assert(code == status, "Status mismatch")
+                assert(msg.lowercased().contains(matches.lowercased()), "Error message must name failure class")
+            } else {
+                assert(false, "Wrong STTError case")
+            }
+        } catch {
+            assert(false, "Unexpected error type")
+        }
+    }
+    await checkStatus(400, matches: "Invalid")
+    await checkStatus(401, matches: "API key")
+    await checkStatus(403, matches: "API key")
+    await checkStatus(429, matches: "quota")
+    await checkStatus(500, matches: "unavailable")
+    // Network failure
+    StubURLProtocol.requestHandler = { _ in throw URLError(.notConnectedToInternet) }
+    do {
+        _ = try await engine.transcribe(audioData: deepgramAudio, language: nil, prompt: nil)
+        assert(false, "Expected networkError")
+    } catch let err as STTError {
+        if case .networkError = err {
+        } else {
+            assert(false, "Expected networkError case")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    // Empty audio makes no network call
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        (geminiHTTPResponse(url: request.url!, status: 200), Data())
+    }
+    do {
+        _ = try await engine.transcribe(audioData: Data(), language: nil, prompt: nil)
+        assert(false, "Expected emptyAudioData")
+    } catch let err as STTError {
+        assert(err == .emptyAudioData, "Expected emptyAudioData")
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    assert(StubURLProtocol.requestCount == 0, "Empty audio must make no network call")
+    // Missing key surfaces distinct auth error
+    let keyless = DeepgramSTTEngine(config: DeepgramSTTConfig(apiKey: nil), session: session)
+    do {
+        _ = try await keyless.transcribe(audioData: deepgramAudio, language: nil, prompt: nil)
+        assert(false, "Expected missing-key auth error")
+    } catch let err as STTError {
+        if case .httpError(let code, let msg) = err {
+            assert(code == 401, "Missing key must be 401")
+            assert(msg.contains("API key"), "Missing key message mismatch")
+        } else {
+            assert(false, "Wrong error for missing key")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+}
+
+await testDeepgramErrors()
+print("✔ DeepgramSTTEngine error taxonomy verified")
+
+// Test 30: Coordinator factory maps Deepgram mode with isolated keys
+@MainActor
+func testDeepgramFactory() async {
+    let suite = "test.deepgram.factory.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.set(STTProviderMode.deepgram.rawValue, forKey: "stt_provider_mode")
+    defaults.set("dg-secret", forKey: "deepgram_api_key")
+    defaults.set("nova-3", forKey: "deepgram_model")
+    defaults.set("gsk-groq-secret", forKey: "stt_api_key")
+    defaults.set("AIza-gemini-secret", forKey: "gemini_api_key")
+    let built = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(built.identifier == "deepgram.nova-3", "Factory identifier mismatch: \(built.identifier)")
+    assert(built.isLocal == false, "Factory Deepgram must be remote")
+    let dgBuilt = built as! DeepgramSTTEngine
+    assert(dgBuilt.config.apiKey == "dg-secret", "Factory must use isolated deepgram key")
+    // Default model fallback
+    defaults.removeObject(forKey: "deepgram_model")
+    let defaulted = DictationCoordinator.makeEngineFromPreferences(defaults: defaults) as! DeepgramSTTEngine
+    assert(defaulted.config.model == "nova-3", "Factory default model mismatch")
+    // Existing modes unchanged
+    defaults.set(STTProviderMode.remote.rawValue, forKey: "stt_provider_mode")
+    let remote = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(remote.identifier.hasPrefix("remote."), "Remote factory broke: \(remote.identifier)")
+    defaults.set(STTProviderMode.gemini.rawValue, forKey: "stt_provider_mode")
+    let gemini = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(gemini.identifier.hasPrefix("gemini."), "Gemini factory broke: \(gemini.identifier)")
+    defaults.removePersistentDomain(forName: suite)
+}
+
+await testDeepgramFactory()
+print("✔ DictationCoordinator Deepgram factory mapping verified")
+
+if ProcessInfo.processInfo.environment["KANSO_LIVE_DEEPGRAM"] == "1" {
+    let liveKey = ProcessInfo.processInfo.environment["DEEPGRAM_API_KEY"] ?? ""
+    assert(!liveKey.isEmpty, "DEEPGRAM_API_KEY required for live check")
+    let live = DeepgramSTTEngine(config: DeepgramSTTConfig(apiKey: liveKey))
+    let clip = WAVWriter.createWAVData(from: Array(repeating: Float(0.1), count: 16_000), sampleRate: 16_000, channels: 1)
+    let liveResult = try await live.transcribe(audioData: clip, language: "en", prompt: nil)
+    print("✔ Live Deepgram check: [\(liveResult.text)]")
+} else {
+    print("○ Live Deepgram check skipped (set KANSO_LIVE_DEEPGRAM=1 + DEEPGRAM_API_KEY to run)")
+}
+// Test 31: CloudflareSTTEngine request shape (Bearer auth, base64 JSON body, account-scoped URL)
+let cloudflareConfig = CloudflareSTTConfig(accountID: "test-acct-id", apiToken: "cf-test-token")
+let cloudflareEngine = CloudflareSTTEngine(config: cloudflareConfig)
+assert(cloudflareEngine.identifier == "cloudflare.whisper-large-v3-turbo", "Cloudflare identifier mismatch: \(cloudflareEngine.identifier)")
+assert(cloudflareEngine.isLocal == false, "Cloudflare must be remote (isLocal == false)")
+let cloudflareAudio = Data([0x52, 0x49, 0x46, 0x46, 0x00, 0x01, 0x02, 0x03])
+let cfRequest = try cloudflareEngine.buildRequest(audioData: cloudflareAudio, language: "id", prompt: "Kanso, Whisper")
+assert(cfRequest.httpMethod == "POST", "Cloudflare must be POST")
+let cfURL = cfRequest.url!
+assert(cfURL.host == "api.cloudflare.com", "Cloudflare host mismatch")
+assert(cfURL.path == "/client/v4/accounts/test-acct-id/ai/run/@cf/openai/whisper-large-v3-turbo", "Cloudflare path mismatch: \(cfURL.path)")
+assert(cfRequest.value(forHTTPHeaderField: "Authorization") == "Bearer cf-test-token", "Cloudflare must use Bearer auth scheme")
+assert(cfRequest.value(forHTTPHeaderField: "Content-Type") == "application/json", "Cloudflare Content-Type mismatch")
+let cfBody = try JSONSerialization.jsonObject(with: cfRequest.httpBody!) as! [String: Any]
+assert((cfBody["audio"] as? String) == cloudflareAudio.base64EncodedString(), "Audio must be base64 WAV bytes")
+assert((cfBody["task"] as? String) == "transcribe", "Task must be transcribe")
+assert((cfBody["language"] as? String) == "id", "Language hint mismatch")
+assert((cfBody["initial_prompt"] as? String) == "Kanso, Whisper", "Prompt must map to initial_prompt")
+// Unset language/prompt omits optional keys but keeps audio + task
+let cfBare = try cloudflareEngine.buildRequest(audioData: cloudflareAudio, language: nil, prompt: nil)
+let cfBareBody = try JSONSerialization.jsonObject(with: cfBare.httpBody!) as! [String: Any]
+assert(cfBareBody["audio"] != nil, "Bare request must keep audio")
+assert((cfBareBody["task"] as? String) == "transcribe", "Bare request must keep task")
+assert(cfBareBody["language"] == nil, "Unset language must be omitted")
+assert(cfBareBody["initial_prompt"] == nil, "Empty prompt must be omitted")
+print("✔ CloudflareSTTEngine request shape verified")
+
+// Test 32: Cloudflare success parse incl. trim + duration fallback
+@MainActor
+func testCloudflareSuccess() async throws {
+    let session = makeGeminiStubSession()
+    let engine = CloudflareSTTEngine(config: CloudflareSTTConfig(accountID: "test-acct-id", apiToken: "cf-test-token"), session: session)
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        assert(request.value(forHTTPHeaderField: "Authorization") == "Bearer cf-test-token", "Stub must see Bearer auth")
+        return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"result\":{\"text\":\"  halo dunia  \",\"duration\":2.5},\"success\":true}".utf8))
+    }
+    let res = try await engine.transcribe(audioData: cloudflareAudio, language: "id", prompt: nil)
+    assert(res.text == "halo dunia", "Trim mismatch: [\(res.text)]")
+    assert(abs(res.durationSeconds - 2.5) < 0.001, "Duration mismatch")
+    assert(res.engineIdentifier == "cloudflare.whisper-large-v3-turbo", "Engine badge mismatch")
+    assert(StubURLProtocol.requestCount == 1, "Must make exactly one run call")
+    // Duration fallback when server omits it
+    StubURLProtocol.requestHandler = { request in
+        (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"result\":{\"text\":\"hello\"},\"success\":true}".utf8))
+    }
+    let res2 = try await engine.transcribe(audioData: cloudflareAudio, language: "en", prompt: nil)
+    assert(res2.text == "hello", "Fallback text mismatch")
+    assert(res2.durationSeconds >= 0, "Fallback duration must be measured")
+}
+
+try await testCloudflareSuccess()
+print("✔ CloudflareSTTEngine success parse verified")
+
+// Test 33: Cloudflare error taxonomy (400/401/403/429/5xx/network/empty-audio)
+@MainActor
+func testCloudflareErrors() async {
+    let session = makeGeminiStubSession()
+    let engine = CloudflareSTTEngine(config: CloudflareSTTConfig(accountID: "test-acct-id", apiToken: "cf-test-token"), session: session)
+    func checkStatus(_ status: Int, matches: String) async {
+        StubURLProtocol.requestHandler = { request in
+            (geminiHTTPResponse(url: request.url!, status: status), Data("{\"success\":false,\"errors\":[{\"message\":\"server says no\"}]}".utf8))
+        }
+        do {
+            _ = try await engine.transcribe(audioData: cloudflareAudio, language: nil, prompt: nil)
+            assert(false, "Expected httpError")
+        } catch let err as STTError {
+            if case .httpError(let code, let msg) = err {
+                assert(code == status, "Status mismatch")
+                assert(msg.lowercased().contains(matches.lowercased()), "Error message must name failure class")
+            } else {
+                assert(false, "Wrong STTError case")
+            }
+        } catch {
+            assert(false, "Unexpected error type")
+        }
+    }
+    await checkStatus(400, matches: "Invalid")
+    await checkStatus(401, matches: "API token")
+    await checkStatus(403, matches: "API token")
+    await checkStatus(429, matches: "quota")
+    await checkStatus(500, matches: "unavailable")
+    // Network failure
+    StubURLProtocol.requestHandler = { _ in throw URLError(.notConnectedToInternet) }
+    do {
+        _ = try await engine.transcribe(audioData: cloudflareAudio, language: nil, prompt: nil)
+        assert(false, "Expected networkError")
+    } catch let err as STTError {
+        if case .networkError = err {
+        } else {
+            assert(false, "Expected networkError case")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    // Empty audio makes no network call
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        (geminiHTTPResponse(url: request.url!, status: 200), Data())
+    }
+    do {
+        _ = try await engine.transcribe(audioData: Data(), language: nil, prompt: nil)
+        assert(false, "Expected emptyAudioData")
+    } catch let err as STTError {
+        assert(err == .emptyAudioData, "Expected emptyAudioData")
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    assert(StubURLProtocol.requestCount == 0, "Empty audio must make no network call")
+    // Missing account/token pair surfaces distinct auth errors
+    let keyless = CloudflareSTTEngine(config: CloudflareSTTConfig(accountID: nil, apiToken: nil), session: session)
+    do {
+        _ = try await keyless.transcribe(audioData: cloudflareAudio, language: nil, prompt: nil)
+        assert(false, "Expected missing-credential auth error")
+    } catch let err as STTError {
+        if case .httpError(let code, _) = err {
+            assert(code == 401, "Missing credentials must be 401")
+        } else {
+            assert(false, "Wrong error for missing credentials")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+}
+
+await testCloudflareErrors()
+print("✔ CloudflareSTTEngine error taxonomy verified")
+
+// Test 34: Coordinator factory maps Cloudflare mode with isolated account+token pair
+@MainActor
+func testCloudflareFactory() async {
+    let suite = "test.cloudflare.factory.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.set(STTProviderMode.cloudflare.rawValue, forKey: "stt_provider_mode")
+    defaults.set("cf-acct-123", forKey: "cloudflare_account_id")
+    defaults.set("cf-token-secret", forKey: "cloudflare_api_token")
+    defaults.set("gsk-groq-secret", forKey: "stt_api_key")
+    defaults.set("AIza-gemini-secret", forKey: "gemini_api_key")
+    defaults.set("dg-secret", forKey: "deepgram_api_key")
+    let built = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(built.identifier == "cloudflare.whisper-large-v3-turbo", "Factory identifier mismatch: \(built.identifier)")
+    assert(built.isLocal == false, "Factory Cloudflare must be remote")
+    let cfBuilt = built as! CloudflareSTTEngine
+    assert(cfBuilt.config.accountID == "cf-acct-123", "Factory must use isolated cloudflare account ID")
+    assert(cfBuilt.config.apiToken == "cf-token-secret", "Factory must use isolated cloudflare token")
+    // Existing modes unchanged
+    defaults.set(STTProviderMode.remote.rawValue, forKey: "stt_provider_mode")
+    let remote = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(remote.identifier.hasPrefix("remote."), "Remote factory broke: \(remote.identifier)")
+    defaults.set(STTProviderMode.gemini.rawValue, forKey: "stt_provider_mode")
+    let gemini = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(gemini.identifier.hasPrefix("gemini."), "Gemini factory broke: \(gemini.identifier)")
+    defaults.set(STTProviderMode.deepgram.rawValue, forKey: "stt_provider_mode")
+    let dg = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(dg.identifier.hasPrefix("deepgram."), "Deepgram factory broke: \(dg.identifier)")
+    defaults.removePersistentDomain(forName: suite)
+}
+
+await testCloudflareFactory()
+print("✔ DictationCoordinator Cloudflare factory mapping verified")
+
+if ProcessInfo.processInfo.environment["KANSO_LIVE_CLOUDFLARE"] == "1" {
+    let liveAccount = ProcessInfo.processInfo.environment["CLOUDFLARE_ACCOUNT_ID"] ?? ""
+    let liveToken = ProcessInfo.processInfo.environment["CLOUDFLARE_API_TOKEN"] ?? ""
+    assert(!liveAccount.isEmpty && !liveToken.isEmpty, "CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN required for live check")
+    let live = CloudflareSTTEngine(config: CloudflareSTTConfig(accountID: liveAccount, apiToken: liveToken))
+    let clip = WAVWriter.createWAVData(from: Array(repeating: Float(0.1), count: 16_000), sampleRate: 16_000, channels: 1)
+    let liveResult = try await live.transcribe(audioData: clip, language: "en", prompt: nil)
+    print("✔ Live Cloudflare check: [\(liveResult.text)]")
+} else {
+    print("○ Live Cloudflare check skipped (set KANSO_LIVE_CLOUDFLARE=1 + CLOUDFLARE_ACCOUNT_ID/CLOUDFLARE_API_TOKEN to run)")
+}
+// Test 35: AssemblyAISTTEngine request shape (raw-key auth, upload + create + poll)
+let assemblyaiConfig = AssemblyAISTTConfig(apiKey: "aai-test-key", model: "universal-2")
+let assemblyaiEngine = AssemblyAISTTEngine(config: assemblyaiConfig)
+assert(assemblyaiEngine.identifier == "assemblyai.universal-2", "AssemblyAI identifier mismatch: \(assemblyaiEngine.identifier)")
+assert(assemblyaiEngine.isLocal == false, "AssemblyAI must be remote (isLocal == false)")
+assert(AssemblyAISTTConfig.defaultModel == "universal-2", "Default model mismatch")
+let assemblyaiAudio = Data([0x52, 0x49, 0x46, 0x46, 0x00, 0x01, 0x02, 0x03])
+let aaiUpload = try assemblyaiEngine.buildUploadRequest(audioData: assemblyaiAudio)
+assert(aaiUpload.httpMethod == "POST", "Upload must be POST")
+assert(aaiUpload.url?.host == "api.assemblyai.com", "Upload host mismatch")
+assert(aaiUpload.url?.path == "/v1/upload", "Upload path mismatch: \(aaiUpload.url?.path ?? "")")
+assert(aaiUpload.value(forHTTPHeaderField: "Authorization") == "aai-test-key", "Upload must use raw-key auth")
+assert(aaiUpload.value(forHTTPHeaderField: "Content-Type") == "application/octet-stream", "Upload Content-Type mismatch")
+assert(aaiUpload.httpBody == assemblyaiAudio, "Upload body must be raw WAV bytes")
+let aaiCreate = try assemblyaiEngine.buildCreateRequest(audioURL: "https://example.com/audio.wav", language: "id", prompt: "Kanso, Whisper")
+assert(aaiCreate.httpMethod == "POST", "Create must be POST")
+assert(aaiCreate.url?.path == "/v1/transcript", "Create path mismatch")
+assert(aaiCreate.value(forHTTPHeaderField: "Authorization") == "aai-test-key", "Create must use raw-key auth")
+let aaiBody = try JSONSerialization.jsonObject(with: aaiCreate.httpBody!) as! [String: Any]
+assert((aaiBody["audio_url"] as? String) == "https://example.com/audio.wav", "audio_url mismatch")
+assert((aaiBody["speech_model"] as? String) == "universal-2", "Model mismatch in body")
+assert((aaiBody["language_code"] as? String) == "id", "Language hint mismatch")
+assert(((aaiBody["word_boost"] as? [String]) ?? []).contains("Kanso"), "Prompt must map to word_boost")
+let aaiBare = try assemblyaiEngine.buildCreateRequest(audioURL: "https://example.com/audio.wav", language: nil, prompt: nil)
+let aaiBareBody = try JSONSerialization.jsonObject(with: aaiBare.httpBody!) as! [String: Any]
+assert(aaiBareBody["language_code"] == nil, "Unset language must be omitted")
+assert(aaiBareBody["word_boost"] == nil, "Empty prompt must be omitted")
+let aaiPoll = try assemblyaiEngine.buildPollRequest(transcriptID: "tr_123")
+assert(aaiPoll.httpMethod == "GET", "Poll must be GET")
+assert(aaiPoll.url?.path == "/v1/transcript/tr_123", "Poll path mismatch: \(aaiPoll.url?.path ?? "")")
+assert(aaiPoll.value(forHTTPHeaderField: "Authorization") == "aai-test-key", "Poll must use raw-key auth")
+print("✔ AssemblyAISTTEngine request shape verified")
+
+// Test 36: AssemblyAI success parse incl. trim + duration fallback + poll timeout
+@MainActor
+func testAssemblyAISuccess() async throws {
+    let session = makeGeminiStubSession()
+    let engine = AssemblyAISTTEngine(config: AssemblyAISTTConfig(apiKey: "aai-test-key"), session: session)
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        let path = request.url!.path
+        if path == "/v1/upload" {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"upload_url\":\"https://example.com/audio.wav\"}".utf8))
+        } else if path == "/v1/transcript" {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"id\":\"tr_123\",\"status\":\"processing\"}".utf8))
+        } else {
+            assert(path == "/v1/transcript/tr_123", "Poll path mismatch: \(path)")
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"id\":\"tr_123\",\"status\":\"completed\",\"text\":\"  halo dunia  \",\"audio_duration\":2.5}".utf8))
+        }
+    }
+    let res = try await engine.transcribe(audioData: assemblyaiAudio, language: "id", prompt: nil)
+    assert(res.text == "halo dunia", "Trim mismatch: [\(res.text)]")
+    assert(abs(res.durationSeconds - 2.5) < 0.001, "Duration mismatch")
+    assert(res.engineIdentifier == "assemblyai.universal-2", "Engine badge mismatch")
+    assert(StubURLProtocol.requestCount == 3, "Must make upload + create + poll calls")
+    // Duration fallback when server omits audio_duration
+    StubURLProtocol.requestHandler = { request in
+        let path = request.url!.path
+        if path == "/v1/upload" {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"upload_url\":\"https://example.com/audio.wav\"}".utf8))
+        } else if path == "/v1/transcript" {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"id\":\"tr_123\",\"status\":\"processing\"}".utf8))
+        } else {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"id\":\"tr_123\",\"status\":\"completed\",\"text\":\"hello\"}".utf8))
+        }
+    }
+    let res2 = try await engine.transcribe(audioData: assemblyaiAudio, language: "en", prompt: nil)
+    assert(res2.text == "hello", "Fallback text mismatch")
+    assert(res2.durationSeconds >= 0, "Fallback duration must be measured")
+    // Poll timeout surfaces networkError
+    let slow = AssemblyAISTTEngine(config: AssemblyAISTTConfig(apiKey: "aai-test-key", pollInterval: 0, maxPollAttempts: 1), session: session)
+    StubURLProtocol.requestHandler = { request in
+        let path = request.url!.path
+        if path == "/v1/upload" {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"upload_url\":\"https://example.com/audio.wav\"}".utf8))
+        } else if path == "/v1/transcript" {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"id\":\"tr_123\",\"status\":\"processing\"}".utf8))
+        } else {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"id\":\"tr_123\",\"status\":\"processing\"}".utf8))
+        }
+    }
+    do {
+        _ = try await slow.transcribe(audioData: assemblyaiAudio, language: nil, prompt: nil)
+        assert(false, "Expected timeout networkError")
+    } catch let err as STTError {
+        if case .networkError = err {
+        } else {
+            assert(false, "Expected networkError on poll timeout")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+}
+
+try await testAssemblyAISuccess()
+print("✔ AssemblyAISTTEngine success parse verified")
+
+// Test 37: AssemblyAI error taxonomy (400/401/403/429/5xx/poll-error/network/empty-audio)
+@MainActor
+func testAssemblyAIErrors() async {
+    let session = makeGeminiStubSession()
+    let engine = AssemblyAISTTEngine(config: AssemblyAISTTConfig(apiKey: "aai-test-key"), session: session)
+    let uploadOK = Data("{\"upload_url\":\"https://example.com/audio.wav\"}".utf8)
+    let createOK = Data("{\"id\":\"tr_123\",\"status\":\"processing\"}".utf8)
+    func checkCreateStatus(_ status: Int, matches: String) async {
+        StubURLProtocol.requestHandler = { request in
+            if request.url!.path == "/v1/upload" { return (geminiHTTPResponse(url: request.url!, status: 200), uploadOK) }
+            return (geminiHTTPResponse(url: request.url!, status: status), Data("{\"error\":\"server says no\"}".utf8))
+        }
+        do {
+            _ = try await engine.transcribe(audioData: assemblyaiAudio, language: nil, prompt: nil)
+            assert(false, "Expected httpError")
+        } catch let err as STTError {
+            if case .httpError(let code, let msg) = err {
+                assert(code == status, "Status mismatch")
+                assert(msg.lowercased().contains(matches.lowercased()), "Error message must name failure class")
+            } else {
+                assert(false, "Wrong STTError case")
+            }
+        } catch {
+            assert(false, "Unexpected error type")
+        }
+    }
+    await checkCreateStatus(400, matches: "Invalid")
+    await checkCreateStatus(401, matches: "API key")
+    await checkCreateStatus(403, matches: "API key")
+    await checkCreateStatus(429, matches: "quota")
+    await checkCreateStatus(500, matches: "unavailable")
+    // Poll error status surfaces httpError
+    StubURLProtocol.requestHandler = { request in
+        let path = request.url!.path
+        if path == "/v1/upload" { return (geminiHTTPResponse(url: request.url!, status: 200), uploadOK) }
+        if path == "/v1/transcript" { return (geminiHTTPResponse(url: request.url!, status: 200), createOK) }
+        return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"id\":\"tr_123\",\"status\":\"error\",\"error\":\"boom\"}".utf8))
+    }
+    do {
+        _ = try await engine.transcribe(audioData: assemblyaiAudio, language: nil, prompt: nil)
+        assert(false, "Expected poll-error httpError")
+    } catch let err as STTError {
+        if case .httpError = err {
+        } else {
+            assert(false, "Expected httpError for error status")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    // Network failure
+    StubURLProtocol.requestHandler = { _ in throw URLError(.notConnectedToInternet) }
+    do {
+        _ = try await engine.transcribe(audioData: assemblyaiAudio, language: nil, prompt: nil)
+        assert(false, "Expected networkError")
+    } catch let err as STTError {
+        if case .networkError = err {
+        } else {
+            assert(false, "Expected networkError case")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    // Empty audio makes no network call
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        (geminiHTTPResponse(url: request.url!, status: 200), Data())
+    }
+    do {
+        _ = try await engine.transcribe(audioData: Data(), language: nil, prompt: nil)
+        assert(false, "Expected emptyAudioData")
+    } catch let err as STTError {
+        assert(err == .emptyAudioData, "Expected emptyAudioData")
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    assert(StubURLProtocol.requestCount == 0, "Empty audio must make no network call")
+    // Missing key surfaces distinct auth error
+    let keyless = AssemblyAISTTEngine(config: AssemblyAISTTConfig(apiKey: nil), session: session)
+    do {
+        _ = try await keyless.transcribe(audioData: assemblyaiAudio, language: nil, prompt: nil)
+        assert(false, "Expected missing-key auth error")
+    } catch let err as STTError {
+        if case .httpError(let code, let msg) = err {
+            assert(code == 401, "Missing key must be 401")
+            assert(msg.contains("API key"), "Missing key message mismatch")
+        } else {
+            assert(false, "Wrong error for missing key")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+}
+
+await testAssemblyAIErrors()
+print("✔ AssemblyAISTTEngine error taxonomy verified")
+
+// Test 38: Coordinator factory maps AssemblyAI mode with isolated keys
+@MainActor
+func testAssemblyAIFactory() async {
+    let suite = "test.assemblyai.factory.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.set(STTProviderMode.assemblyai.rawValue, forKey: "stt_provider_mode")
+    defaults.set("aai-secret", forKey: "assemblyai_api_key")
+    defaults.set("universal-2", forKey: "assemblyai_model")
+    defaults.set("gsk-groq-secret", forKey: "stt_api_key")
+    let built = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(built.identifier == "assemblyai.universal-2", "Factory identifier mismatch: \(built.identifier)")
+    assert(built.isLocal == false, "Factory AssemblyAI must be remote")
+    let aaiBuilt = built as! AssemblyAISTTEngine
+    assert(aaiBuilt.config.apiKey == "aai-secret", "Factory must use isolated assemblyai key")
+    defaults.removeObject(forKey: "assemblyai_model")
+    let defaulted = DictationCoordinator.makeEngineFromPreferences(defaults: defaults) as! AssemblyAISTTEngine
+    assert(defaulted.config.model == "universal-2", "Factory default model mismatch")
+    defaults.set(STTProviderMode.remote.rawValue, forKey: "stt_provider_mode")
+    let remote = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(remote.identifier.hasPrefix("remote."), "Remote factory broke: \(remote.identifier)")
+    defaults.removePersistentDomain(forName: suite)
+}
+
+await testAssemblyAIFactory()
+print("✔ DictationCoordinator AssemblyAI factory mapping verified")
+// Code-review fix: AssemblyAI sends the key raw (primary: assemblyai.com/docs/api-reference
+// shows `Authorization: <YOUR_API_KEY>`; Bearer is only optionally accepted).
+let aaiSpaced = AssemblyAISTTEngine(config: AssemblyAISTTConfig(apiKey: "  aai-test-key  "))
+let aaiSpacedUpload = try aaiSpaced.buildUploadRequest(audioData: assemblyaiAudio)
+assert(aaiSpacedUpload.value(forHTTPHeaderField: "Authorization") == "aai-test-key", "AssemblyAI must send trimmed raw key, no Bearer prefix")
+print("✔ AssemblyAI raw-key auth verified")
+
+if ProcessInfo.processInfo.environment["KANSO_LIVE_ASSEMBLYAI"] == "1" {
+    let liveKey = ProcessInfo.processInfo.environment["ASSEMBLYAI_API_KEY"] ?? ""
+    assert(!liveKey.isEmpty, "ASSEMBLYAI_API_KEY required for live check")
+    let live = AssemblyAISTTEngine(config: AssemblyAISTTConfig(apiKey: liveKey))
+    let clip = WAVWriter.createWAVData(from: Array(repeating: Float(0.1), count: 16_000), sampleRate: 16_000, channels: 1)
+    let liveResult = try await live.transcribe(audioData: clip, language: "en", prompt: nil)
+    print("✔ Live AssemblyAI check: [\(liveResult.text)]")
+} else {
+    print("○ Live AssemblyAI check skipped (set KANSO_LIVE_ASSEMBLYAI=1 + ASSEMBLYAI_API_KEY to run)")
+}
+
+// Test 39: SpeechmaticsSTTEngine request shape (Bearer auth, multipart config + WAV)
+let speechmaticsConfig = SpeechmaticsSTTConfig(apiKey: "sm-test-key", model: "enhanced")
+let speechmaticsEngine = SpeechmaticsSTTEngine(config: speechmaticsConfig)
+assert(speechmaticsEngine.identifier == "speechmatics.enhanced", "Speechmatics identifier mismatch: \(speechmaticsEngine.identifier)")
+assert(speechmaticsEngine.isLocal == false, "Speechmatics must be remote (isLocal == false)")
+assert(SpeechmaticsSTTConfig.defaultModel == "enhanced", "Default model mismatch")
+let speechmaticsAudio = Data([0x52, 0x49, 0x46, 0x46, 0x00, 0x01, 0x02, 0x03])
+let smCreate = try speechmaticsEngine.buildCreateRequest(audioData: speechmaticsAudio, language: "id", prompt: "Kanso, Whisper", boundary: "test-boundary")
+assert(smCreate.httpMethod == "POST", "Create must be POST")
+assert(smCreate.url?.host == "asr.api.speechmatics.com", "Create host mismatch")
+assert(smCreate.url?.path == "/v2/jobs", "Create path mismatch: \(smCreate.url?.path ?? "")")
+assert(smCreate.value(forHTTPHeaderField: "Authorization") == "Bearer sm-test-key", "Create must use Bearer auth")
+assert(smCreate.value(forHTTPHeaderField: "Content-Type") == "multipart/form-data; boundary=test-boundary", "Content-Type mismatch")
+guard let smBodyData = smCreate.httpBody, let smBody = String(data: smBodyData, encoding: .utf8) else {
+    fatalError("Failed to decode Speechmatics HTTP body")
+}
+assert(smBody.contains("name=\"data_file\"; filename=\"audio.wav\""), "Missing data_file part")
+assert(smBody.contains("name=\"config\""), "Missing config part")
+assert(smBody.contains("\"operating_point\":\"enhanced\"") || smBody.contains("\"operating_point\": \"enhanced\""), "Config must carry operating_point")
+assert(smBody.contains("\"language\":\"id\"") || smBody.contains("\"language\": \"id\""), "Config must carry language")
+assert(smBody.contains("Kanso"), "Prompt must map to additional_vocab")
+let smBare = try speechmaticsEngine.buildCreateRequest(audioData: speechmaticsAudio, language: nil, prompt: nil, boundary: "test-boundary")
+let smBareStr = String(data: smBare.httpBody!, encoding: .utf8)!
+assert(!smBareStr.contains("\"language\""), "Unset language must be omitted")
+assert(!smBareStr.contains("additional_vocab"), "Empty prompt must be omitted")
+let smPoll = try speechmaticsEngine.buildPollRequest(jobID: "job1")
+assert(smPoll.httpMethod == "GET", "Poll must be GET")
+assert(smPoll.url?.path == "/v2/jobs/job1", "Poll path mismatch: \(smPoll.url?.path ?? "")")
+assert(smPoll.value(forHTTPHeaderField: "Authorization") == "Bearer sm-test-key", "Poll must use Bearer auth")
+let smTranscript = try speechmaticsEngine.buildTranscriptRequest(jobID: "job1")
+assert(smTranscript.httpMethod == "GET", "Transcript fetch must be GET")
+assert(smTranscript.url?.path == "/v2/jobs/job1/transcript", "Transcript path mismatch: \(smTranscript.url?.path ?? "")")
+print("✔ SpeechmaticsSTTEngine request shape verified")
+
+// Test 40: Speechmatics success parse incl. trim + duration fallback + poll timeout
+@MainActor
+func testSpeechmaticsSuccess() async throws {
+    let session = makeGeminiStubSession()
+    let engine = SpeechmaticsSTTEngine(config: SpeechmaticsSTTConfig(apiKey: "sm-test-key"), session: session)
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        let path = request.url!.path
+        if path == "/v2/jobs" {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"id\":\"job1\"}".utf8))
+        } else if path == "/v2/jobs/job1" {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"job\":{\"id\":\"job1\",\"status\":\"done\"}}".utf8))
+        } else {
+            assert(path == "/v2/jobs/job1/transcript", "Transcript path mismatch: \(path)")
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"content\":\"  halo dunia  \"}".utf8))
+        }
+    }
+    let res = try await engine.transcribe(audioData: speechmaticsAudio, language: "id", prompt: nil)
+    assert(res.text == "halo dunia", "Trim mismatch: [\(res.text)]")
+    assert(res.durationSeconds >= 0, "Fallback duration must be measured")
+    assert(res.engineIdentifier == "speechmatics.enhanced", "Engine badge mismatch")
+    assert(StubURLProtocol.requestCount == 3, "Must make create + poll + transcript calls")
+    // Poll timeout surfaces networkError
+    let slow = SpeechmaticsSTTEngine(config: SpeechmaticsSTTConfig(apiKey: "sm-test-key", pollInterval: 0, maxPollAttempts: 1), session: session)
+    StubURLProtocol.requestHandler = { request in
+        if request.url!.path == "/v2/jobs" {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"id\":\"job1\"}".utf8))
+        }
+        return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"job\":{\"id\":\"job1\",\"status\":\"in_progress\"}}".utf8))
+    }
+    do {
+        _ = try await slow.transcribe(audioData: speechmaticsAudio, language: nil, prompt: nil)
+        assert(false, "Expected timeout networkError")
+    } catch let err as STTError {
+        if case .networkError = err {
+        } else {
+            assert(false, "Expected networkError on poll timeout")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+}
+
+try await testSpeechmaticsSuccess()
+print("✔ SpeechmaticsSTTEngine success parse verified")
+
+// Test 41: Speechmatics error taxonomy (400/401/403/429/5xx/rejected/network/empty-audio)
+@MainActor
+func testSpeechmaticsErrors() async {
+    let session = makeGeminiStubSession()
+    let engine = SpeechmaticsSTTEngine(config: SpeechmaticsSTTConfig(apiKey: "sm-test-key"), session: session)
+    func checkCreateStatus(_ status: Int, matches: String) async {
+        StubURLProtocol.requestHandler = { request in
+            (geminiHTTPResponse(url: request.url!, status: status), Data("{\"error\":\"server says no\"}".utf8))
+        }
+        do {
+            _ = try await engine.transcribe(audioData: speechmaticsAudio, language: nil, prompt: nil)
+            assert(false, "Expected httpError")
+        } catch let err as STTError {
+            if case .httpError(let code, let msg) = err {
+                assert(code == status, "Status mismatch")
+                assert(msg.lowercased().contains(matches.lowercased()), "Error message must name failure class")
+            } else {
+                assert(false, "Wrong STTError case")
+            }
+        } catch {
+            assert(false, "Unexpected error type")
+        }
+    }
+    await checkCreateStatus(400, matches: "Invalid")
+    await checkCreateStatus(401, matches: "API key")
+    await checkCreateStatus(403, matches: "API key")
+    await checkCreateStatus(429, matches: "quota")
+    await checkCreateStatus(500, matches: "unavailable")
+    // Rejected job surfaces httpError
+    StubURLProtocol.requestHandler = { request in
+        if request.url!.path == "/v2/jobs" {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"id\":\"job1\"}".utf8))
+        }
+        return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"job\":{\"id\":\"job1\",\"status\":\"rejected\"}}".utf8))
+    }
+    do {
+        _ = try await engine.transcribe(audioData: speechmaticsAudio, language: nil, prompt: nil)
+        assert(false, "Expected rejected-job httpError")
+    } catch let err as STTError {
+        if case .httpError = err {
+        } else {
+            assert(false, "Expected httpError for rejected job")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    // Network failure
+    StubURLProtocol.requestHandler = { _ in throw URLError(.notConnectedToInternet) }
+    do {
+        _ = try await engine.transcribe(audioData: speechmaticsAudio, language: nil, prompt: nil)
+        assert(false, "Expected networkError")
+    } catch let err as STTError {
+        if case .networkError = err {
+        } else {
+            assert(false, "Expected networkError case")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    // Empty audio makes no network call
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        (geminiHTTPResponse(url: request.url!, status: 200), Data())
+    }
+    do {
+        _ = try await engine.transcribe(audioData: Data(), language: nil, prompt: nil)
+        assert(false, "Expected emptyAudioData")
+    } catch let err as STTError {
+        assert(err == .emptyAudioData, "Expected emptyAudioData")
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    assert(StubURLProtocol.requestCount == 0, "Empty audio must make no network call")
+    // Missing key surfaces distinct auth error
+    let keyless = SpeechmaticsSTTEngine(config: SpeechmaticsSTTConfig(apiKey: nil), session: session)
+    do {
+        _ = try await keyless.transcribe(audioData: speechmaticsAudio, language: nil, prompt: nil)
+        assert(false, "Expected missing-key auth error")
+    } catch let err as STTError {
+        if case .httpError(let code, let msg) = err {
+            assert(code == 401, "Missing key must be 401")
+            assert(msg.contains("API key"), "Missing key message mismatch")
+        } else {
+            assert(false, "Wrong error for missing key")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+}
+
+await testSpeechmaticsErrors()
+print("✔ SpeechmaticsSTTEngine error taxonomy verified")
+
+// Test 42: Coordinator factory maps Speechmatics mode with isolated keys
+@MainActor
+func testSpeechmaticsFactory() async {
+    let suite = "test.speechmatics.factory.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.set(STTProviderMode.speechmatics.rawValue, forKey: "stt_provider_mode")
+    defaults.set("sm-secret", forKey: "speechmatics_api_key")
+    defaults.set("enhanced", forKey: "speechmatics_model")
+    defaults.set("gsk-groq-secret", forKey: "stt_api_key")
+    let built = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(built.identifier == "speechmatics.enhanced", "Factory identifier mismatch: \(built.identifier)")
+    assert(built.isLocal == false, "Factory Speechmatics must be remote")
+    let smBuilt = built as! SpeechmaticsSTTEngine
+    assert(smBuilt.config.apiKey == "sm-secret", "Factory must use isolated speechmatics key")
+    defaults.removeObject(forKey: "speechmatics_model")
+    let defaulted = DictationCoordinator.makeEngineFromPreferences(defaults: defaults) as! SpeechmaticsSTTEngine
+    assert(defaulted.config.model == "enhanced", "Factory default model mismatch")
+    defaults.set(STTProviderMode.assemblyai.rawValue, forKey: "stt_provider_mode")
+    let aai = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(aai.identifier.hasPrefix("assemblyai."), "AssemblyAI factory broke: \(aai.identifier)")
+    defaults.removePersistentDomain(forName: suite)
+}
+
+await testSpeechmaticsFactory()
+print("✔ DictationCoordinator Speechmatics factory mapping verified")
+
+if ProcessInfo.processInfo.environment["KANSO_LIVE_SPEECHMATICS"] == "1" {
+    let liveKey = ProcessInfo.processInfo.environment["SPEECHMATICS_API_KEY"] ?? ""
+    assert(!liveKey.isEmpty, "SPEECHMATICS_API_KEY required for live check")
+    let live = SpeechmaticsSTTEngine(config: SpeechmaticsSTTConfig(apiKey: liveKey))
+    let clip = WAVWriter.createWAVData(from: Array(repeating: Float(0.1), count: 16_000), sampleRate: 16_000, channels: 1)
+    let liveResult = try await live.transcribe(audioData: clip, language: "en", prompt: nil)
+    print("✔ Live Speechmatics check: [\(liveResult.text)]")
+} else {
+    print("○ Live Speechmatics check skipped (set KANSO_LIVE_SPEECHMATICS=1 + SPEECHMATICS_API_KEY to run)")
+}
+
+// Test 43: RevAISTTEngine request shape (Bearer access token, multipart media + options)
+let revaiConfig = RevAISTTConfig(apiKey: "rev-test-token", model: "reverb")
+let revaiEngine = RevAISTTEngine(config: revaiConfig)
+assert(revaiEngine.identifier == "revai.reverb", "Rev.ai identifier mismatch: \(revaiEngine.identifier)")
+assert(revaiEngine.isLocal == false, "Rev.ai must be remote (isLocal == false)")
+assert(RevAISTTConfig.defaultModel == "reverb", "Default model mismatch")
+let revaiAudio = Data([0x52, 0x49, 0x46, 0x46, 0x00, 0x01, 0x02, 0x03])
+let revSubmit = try revaiEngine.buildSubmitRequest(audioData: revaiAudio, language: "en", prompt: "Kanso, Whisper", boundary: "test-boundary")
+assert(revSubmit.httpMethod == "POST", "Submit must be POST")
+assert(revSubmit.url?.host == "api.rev.ai", "Submit host mismatch")
+assert(revSubmit.url?.path == "/speechtotext/v1/jobs", "Submit path mismatch: \(revSubmit.url?.path ?? "")")
+assert(revSubmit.value(forHTTPHeaderField: "Authorization") == "Bearer rev-test-token", "Submit must use Bearer access token")
+assert(revSubmit.value(forHTTPHeaderField: "Content-Type") == "multipart/form-data; boundary=test-boundary", "Content-Type mismatch")
+guard let revBodyData = revSubmit.httpBody, let revBody = String(data: revBodyData, encoding: .utf8) else {
+    fatalError("Failed to decode Rev.ai HTTP body")
+}
+assert(revBody.contains("name=\"media\"; filename=\"audio.wav\""), "Missing media part")
+assert(revBody.contains("name=\"options\""), "Missing options part")
+assert(revBody.contains("reverb"), "Options must carry model")
+assert(revBody.contains("\"language\":\"en\"") || revBody.contains("\"language\": \"en\""), "Options must carry language")
+assert(revBody.contains("Kanso"), "Prompt must map to custom_vocabularies")
+let revBare = try revaiEngine.buildSubmitRequest(audioData: revaiAudio, language: nil, prompt: nil, boundary: "test-boundary")
+let revBareStr = String(data: revBare.httpBody!, encoding: .utf8)!
+assert(!revBareStr.contains("\"language\""), "Unset language must be omitted")
+assert(!revBareStr.contains("custom_vocabularies"), "Empty prompt must be omitted")
+let revPoll = try revaiEngine.buildPollRequest(jobID: "job1")
+assert(revPoll.httpMethod == "GET", "Poll must be GET")
+assert(revPoll.url?.path == "/speechtotext/v1/jobs/job1", "Poll path mismatch: \(revPoll.url?.path ?? "")")
+assert(revPoll.value(forHTTPHeaderField: "Authorization") == "Bearer rev-test-token", "Poll must use Bearer access token")
+let revTranscript = try revaiEngine.buildTranscriptRequest(jobID: "job1")
+assert(revTranscript.httpMethod == "GET", "Transcript fetch must be GET")
+assert(revTranscript.url?.path == "/speechtotext/v1/jobs/job1/transcript", "Transcript path mismatch: \(revTranscript.url?.path ?? "")")
+print("✔ RevAISTTEngine request shape verified")
+
+// Test 44: Rev.ai success parse incl. trim + duration fallback + poll timeout
+@MainActor
+func testRevAISuccess() async throws {
+    let session = makeGeminiStubSession()
+    let engine = RevAISTTEngine(config: RevAISTTConfig(apiKey: "rev-test-token"), session: session)
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        let path = request.url!.path
+        if path == "/speechtotext/v1/jobs" {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"id\":\"job1\"}".utf8))
+        } else if path == "/speechtotext/v1/jobs/job1" {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"id\":\"job1\",\"status\":\"transcribed\"}".utf8))
+        } else {
+            assert(path == "/speechtotext/v1/jobs/job1/transcript", "Transcript path mismatch: \(path)")
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("  halo dunia  ".utf8))
+        }
+    }
+    let res = try await engine.transcribe(audioData: revaiAudio, language: "en", prompt: nil)
+    assert(res.text == "halo dunia", "Trim mismatch: [\(res.text)]")
+    assert(res.durationSeconds >= 0, "Fallback duration must be measured")
+    assert(res.engineIdentifier == "revai.reverb", "Engine badge mismatch")
+    assert(StubURLProtocol.requestCount == 3, "Must make submit + poll + transcript calls")
+    // Poll timeout surfaces networkError
+    let slow = RevAISTTEngine(config: RevAISTTConfig(apiKey: "rev-test-token", pollInterval: 0, maxPollAttempts: 1), session: session)
+    StubURLProtocol.requestHandler = { request in
+        if request.url!.path == "/speechtotext/v1/jobs" {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"id\":\"job1\"}".utf8))
+        }
+        return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"id\":\"job1\",\"status\":\"in_progress\"}".utf8))
+    }
+    do {
+        _ = try await slow.transcribe(audioData: revaiAudio, language: nil, prompt: nil)
+        assert(false, "Expected timeout networkError")
+    } catch let err as STTError {
+        if case .networkError = err {
+        } else {
+            assert(false, "Expected networkError on poll timeout")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+}
+
+try await testRevAISuccess()
+print("✔ RevAISTTEngine success parse verified")
+
+// Test 45: Rev.ai error taxonomy (400/401/403/429/5xx/failed/network/empty-audio)
+@MainActor
+func testRevAIErrors() async {
+    let session = makeGeminiStubSession()
+    let engine = RevAISTTEngine(config: RevAISTTConfig(apiKey: "rev-test-token"), session: session)
+    func checkSubmitStatus(_ status: Int, matches: String) async {
+        StubURLProtocol.requestHandler = { request in
+            (geminiHTTPResponse(url: request.url!, status: status), Data("{\"title\":\"server says no\"}".utf8))
+        }
+        do {
+            _ = try await engine.transcribe(audioData: revaiAudio, language: nil, prompt: nil)
+            assert(false, "Expected httpError")
+        } catch let err as STTError {
+            if case .httpError(let code, let msg) = err {
+                assert(code == status, "Status mismatch")
+                assert(msg.lowercased().contains(matches.lowercased()), "Error message must name failure class")
+            } else {
+                assert(false, "Wrong STTError case")
+            }
+        } catch {
+            assert(false, "Unexpected error type")
+        }
+    }
+    await checkSubmitStatus(400, matches: "Invalid")
+    await checkSubmitStatus(401, matches: "access token")
+    await checkSubmitStatus(403, matches: "access token")
+    await checkSubmitStatus(429, matches: "quota")
+    await checkSubmitStatus(500, matches: "unavailable")
+    // Failed job surfaces httpError
+    StubURLProtocol.requestHandler = { request in
+        if request.url!.path == "/speechtotext/v1/jobs" {
+            return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"id\":\"job1\"}".utf8))
+        }
+        return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"id\":\"job1\",\"status\":\"failed\",\"failure_detail\":\"bad audio\"}".utf8))
+    }
+    do {
+        _ = try await engine.transcribe(audioData: revaiAudio, language: nil, prompt: nil)
+        assert(false, "Expected failed-job httpError")
+    } catch let err as STTError {
+        if case .httpError = err {
+        } else {
+            assert(false, "Expected httpError for failed job")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    // Network failure
+    StubURLProtocol.requestHandler = { _ in throw URLError(.notConnectedToInternet) }
+    do {
+        _ = try await engine.transcribe(audioData: revaiAudio, language: nil, prompt: nil)
+        assert(false, "Expected networkError")
+    } catch let err as STTError {
+        if case .networkError = err {
+        } else {
+            assert(false, "Expected networkError case")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    // Empty audio makes no network call
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        (geminiHTTPResponse(url: request.url!, status: 200), Data())
+    }
+    do {
+        _ = try await engine.transcribe(audioData: Data(), language: nil, prompt: nil)
+        assert(false, "Expected emptyAudioData")
+    } catch let err as STTError {
+        assert(err == .emptyAudioData, "Expected emptyAudioData")
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    assert(StubURLProtocol.requestCount == 0, "Empty audio must make no network call")
+    // Missing token surfaces distinct auth error
+    let keyless = RevAISTTEngine(config: RevAISTTConfig(apiKey: nil), session: session)
+    do {
+        _ = try await keyless.transcribe(audioData: revaiAudio, language: nil, prompt: nil)
+        assert(false, "Expected missing-token auth error")
+    } catch let err as STTError {
+        if case .httpError(let code, let msg) = err {
+            assert(code == 401, "Missing token must be 401")
+            assert(msg.contains("access token"), "Missing token message mismatch")
+        } else {
+            assert(false, "Wrong error for missing token")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+}
+
+await testRevAIErrors()
+print("✔ RevAISTTEngine error taxonomy verified")
+
+// Test 46: Coordinator factory maps Rev.ai mode with isolated keys
+@MainActor
+func testRevAIFactory() async {
+    let suite = "test.revai.factory.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.set(STTProviderMode.revai.rawValue, forKey: "stt_provider_mode")
+    defaults.set("rev-secret", forKey: "revai_api_key")
+    defaults.set("reverb", forKey: "revai_model")
+    defaults.set("gsk-groq-secret", forKey: "stt_api_key")
+    let built = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(built.identifier == "revai.reverb", "Factory identifier mismatch: \(built.identifier)")
+    assert(built.isLocal == false, "Factory Rev.ai must be remote")
+    let revBuilt = built as! RevAISTTEngine
+    assert(revBuilt.config.apiKey == "rev-secret", "Factory must use isolated revai key")
+    defaults.removeObject(forKey: "revai_model")
+    let defaulted = DictationCoordinator.makeEngineFromPreferences(defaults: defaults) as! RevAISTTEngine
+    assert(defaulted.config.model == "reverb", "Factory default model mismatch")
+    defaults.set(STTProviderMode.speechmatics.rawValue, forKey: "stt_provider_mode")
+    let sm = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(sm.identifier.hasPrefix("speechmatics."), "Speechmatics factory broke: \(sm.identifier)")
+    defaults.removePersistentDomain(forName: suite)
+}
+
+await testRevAIFactory()
+print("✔ DictationCoordinator Rev.ai factory mapping verified")
+
+if ProcessInfo.processInfo.environment["KANSO_LIVE_REVAI"] == "1" {
+    let liveKey = ProcessInfo.processInfo.environment["REVAI_API_KEY"] ?? ""
+    assert(!liveKey.isEmpty, "REVAI_API_KEY required for live check")
+    let live = RevAISTTEngine(config: RevAISTTConfig(apiKey: liveKey))
+    let clip = WAVWriter.createWAVData(from: Array(repeating: Float(0.1), count: 16_000), sampleRate: 16_000, channels: 1)
+    let liveResult = try await live.transcribe(audioData: clip, language: "en", prompt: nil)
+    print("✔ Live Rev.ai check: [\(liveResult.text)]")
+} else {
+    print("○ Live Rev.ai check skipped (set KANSO_LIVE_REVAI=1 + REVAI_API_KEY to run)")
+}
+
+// Test 47: ElevenLabsSTTEngine request shape (xi-api-key auth, multipart file + model_id)
+let elevenlabsConfig = ElevenLabsSTTConfig(apiKey: "xi-test-key", model: "scribe_v2")
+let elevenlabsEngine = ElevenLabsSTTEngine(config: elevenlabsConfig)
+assert(elevenlabsEngine.identifier == "elevenlabs.scribe-v2", "ElevenLabs identifier mismatch: \(elevenlabsEngine.identifier)")
+assert(elevenlabsEngine.isLocal == false, "ElevenLabs must be remote (isLocal == false)")
+assert(ElevenLabsSTTConfig.defaultModel == "scribe_v2", "Default model mismatch")
+let elevenlabsAudio = Data([0x52, 0x49, 0x46, 0x46, 0x00, 0x01, 0x02, 0x03])
+let elRequest = try elevenlabsEngine.buildRequest(audioData: elevenlabsAudio, language: "id", boundary: "test-boundary")
+assert(elRequest.httpMethod == "POST", "ElevenLabs must be POST")
+assert(elRequest.url?.host == "api.elevenlabs.io", "ElevenLabs host mismatch")
+assert(elRequest.url?.path == "/v1/speech-to-text", "ElevenLabs path mismatch: \(elRequest.url?.path ?? "")")
+assert(elRequest.value(forHTTPHeaderField: "xi-api-key") == "xi-test-key", "ElevenLabs must use xi-api-key header")
+assert(elRequest.value(forHTTPHeaderField: "Authorization") == nil, "ElevenLabs must NOT use Bearer auth")
+assert(elRequest.value(forHTTPHeaderField: "Content-Type") == "multipart/form-data; boundary=test-boundary", "Content-Type mismatch")
+guard let elBodyData = elRequest.httpBody, let elBody = String(data: elBodyData, encoding: .utf8) else {
+    fatalError("Failed to decode ElevenLabs HTTP body")
+}
+assert(elBody.contains("name=\"model_id\"\r\n\r\nscribe_v2"), "Missing model_id in body")
+assert(elBody.contains("name=\"language_code\"\r\n\r\nid"), "Missing language_code in body")
+assert(elBody.contains("name=\"file\"; filename=\"audio.wav\""), "Missing file part in body")
+let elBare = try elevenlabsEngine.buildRequest(audioData: elevenlabsAudio, language: nil, boundary: "test-boundary")
+let elBareStr = String(data: elBare.httpBody!, encoding: .utf8)!
+assert(!elBareStr.contains("language_code"), "Unset language must be omitted")
+assert(elBareStr.contains("name=\"model_id\""), "Bare request must keep model_id")
+print("✔ ElevenLabsSTTEngine request shape verified")
+
+// Test 48: ElevenLabs success parse incl. trim + duration fallback
+@MainActor
+func testElevenLabsSuccess() async throws {
+    let session = makeGeminiStubSession()
+    let engine = ElevenLabsSTTEngine(config: ElevenLabsSTTConfig(apiKey: "xi-test-key"), session: session)
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        assert(request.value(forHTTPHeaderField: "xi-api-key") == "xi-test-key", "Stub must see xi-api-key auth")
+        assert(request.value(forHTTPHeaderField: "Authorization") == nil, "Stub must see no Bearer auth")
+        return (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"text\":\"  halo dunia  \",\"language_code\":\"id\"}".utf8))
+    }
+    let res = try await engine.transcribe(audioData: elevenlabsAudio, language: "id", prompt: nil)
+    assert(res.text == "halo dunia", "Trim mismatch: [\(res.text)]")
+    assert(res.durationSeconds >= 0, "Fallback duration must be measured")
+    assert(res.engineIdentifier == "elevenlabs.scribe-v2", "Engine badge mismatch")
+    assert(StubURLProtocol.requestCount == 1, "Must make exactly one speech-to-text call")
+    // Server duration honored when present
+    StubURLProtocol.requestHandler = { request in
+        (geminiHTTPResponse(url: request.url!, status: 200), Data("{\"text\":\"hello\",\"duration\":1.5}".utf8))
+    }
+    let res2 = try await engine.transcribe(audioData: elevenlabsAudio, language: "en", prompt: nil)
+    assert(res2.text == "hello", "Fallback text mismatch")
+    assert(abs(res2.durationSeconds - 1.5) < 0.001, "Duration mismatch")
+}
+
+try await testElevenLabsSuccess()
+print("✔ ElevenLabsSTTEngine success parse verified")
+
+// Test 49: ElevenLabs error taxonomy (400/401/403/429/5xx/network/empty-audio)
+@MainActor
+func testElevenLabsErrors() async {
+    let session = makeGeminiStubSession()
+    let engine = ElevenLabsSTTEngine(config: ElevenLabsSTTConfig(apiKey: "xi-test-key"), session: session)
+    func checkStatus(_ status: Int, matches: String) async {
+        StubURLProtocol.requestHandler = { request in
+            (geminiHTTPResponse(url: request.url!, status: status), Data("{\"detail\":{\"message\":\"server says no\"}}".utf8))
+        }
+        do {
+            _ = try await engine.transcribe(audioData: elevenlabsAudio, language: nil, prompt: nil)
+            assert(false, "Expected httpError")
+        } catch let err as STTError {
+            if case .httpError(let code, let msg) = err {
+                assert(code == status, "Status mismatch")
+                assert(msg.lowercased().contains(matches.lowercased()), "Error message must name failure class")
+            } else {
+                assert(false, "Wrong STTError case")
+            }
+        } catch {
+            assert(false, "Unexpected error type")
+        }
+    }
+    await checkStatus(400, matches: "Invalid")
+    await checkStatus(401, matches: "API key")
+    await checkStatus(403, matches: "API key")
+    await checkStatus(429, matches: "quota")
+    await checkStatus(500, matches: "unavailable")
+    // Network failure
+    StubURLProtocol.requestHandler = { _ in throw URLError(.notConnectedToInternet) }
+    do {
+        _ = try await engine.transcribe(audioData: elevenlabsAudio, language: nil, prompt: nil)
+        assert(false, "Expected networkError")
+    } catch let err as STTError {
+        if case .networkError = err {
+        } else {
+            assert(false, "Expected networkError case")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    // Empty audio makes no network call
+    StubURLProtocol.requestCount = 0
+    StubURLProtocol.requestHandler = { request in
+        (geminiHTTPResponse(url: request.url!, status: 200), Data())
+    }
+    do {
+        _ = try await engine.transcribe(audioData: Data(), language: nil, prompt: nil)
+        assert(false, "Expected emptyAudioData")
+    } catch let err as STTError {
+        assert(err == .emptyAudioData, "Expected emptyAudioData")
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+    assert(StubURLProtocol.requestCount == 0, "Empty audio must make no network call")
+    // Missing key surfaces distinct auth error
+    let keyless = ElevenLabsSTTEngine(config: ElevenLabsSTTConfig(apiKey: nil), session: session)
+    do {
+        _ = try await keyless.transcribe(audioData: elevenlabsAudio, language: nil, prompt: nil)
+        assert(false, "Expected missing-key auth error")
+    } catch let err as STTError {
+        if case .httpError(let code, let msg) = err {
+            assert(code == 401, "Missing key must be 401")
+            assert(msg.contains("API key"), "Missing key message mismatch")
+        } else {
+            assert(false, "Wrong error for missing key")
+        }
+    } catch {
+        assert(false, "Unexpected error type")
+    }
+}
+
+await testElevenLabsErrors()
+print("✔ ElevenLabsSTTEngine error taxonomy verified")
+
+// Test 50: Coordinator factory maps ElevenLabs mode with isolated keys
+@MainActor
+func testElevenLabsFactory() async {
+    let suite = "test.elevenlabs.factory.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.set(STTProviderMode.elevenlabs.rawValue, forKey: "stt_provider_mode")
+    defaults.set("xi-secret", forKey: "elevenlabs_api_key")
+    defaults.set("scribe_v2", forKey: "elevenlabs_model")
+    defaults.set("gsk-groq-secret", forKey: "stt_api_key")
+    defaults.set("rev-secret", forKey: "revai_api_key")
+    let built = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(built.identifier == "elevenlabs.scribe-v2", "Factory identifier mismatch: \(built.identifier)")
+    assert(built.isLocal == false, "Factory ElevenLabs must be remote")
+    let elBuilt = built as! ElevenLabsSTTEngine
+    assert(elBuilt.config.apiKey == "xi-secret", "Factory must use isolated elevenlabs key")
+    // Default model fallback
+    defaults.removeObject(forKey: "elevenlabs_model")
+    let defaulted = DictationCoordinator.makeEngineFromPreferences(defaults: defaults) as! ElevenLabsSTTEngine
+    assert(defaulted.config.model == "scribe_v2", "Factory default model mismatch")
+    // Existing modes unchanged
+    defaults.set(STTProviderMode.remote.rawValue, forKey: "stt_provider_mode")
+    let remote = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(remote.identifier.hasPrefix("remote."), "Remote factory broke: \(remote.identifier)")
+    defaults.set(STTProviderMode.revai.rawValue, forKey: "stt_provider_mode")
+    let rev = DictationCoordinator.makeEngineFromPreferences(defaults: defaults)
+    assert(rev.identifier.hasPrefix("revai."), "Rev.ai factory broke: \(rev.identifier)")
+    defaults.removePersistentDomain(forName: suite)
+}
+
+await testElevenLabsFactory()
+print("✔ DictationCoordinator ElevenLabs factory mapping verified")
+
+if ProcessInfo.processInfo.environment["KANSO_LIVE_ELEVENLABS"] == "1" {
+    let liveKey = ProcessInfo.processInfo.environment["ELEVENLABS_API_KEY"] ?? ""
+    assert(!liveKey.isEmpty, "ELEVENLABS_API_KEY required for live check")
+    let live = ElevenLabsSTTEngine(config: ElevenLabsSTTConfig(apiKey: liveKey))
+    let clip = WAVWriter.createWAVData(from: Array(repeating: Float(0.1), count: 16_000), sampleRate: 16_000, channels: 1)
+    let liveResult = try await live.transcribe(audioData: clip, language: "en", prompt: nil)
+    print("✔ Live ElevenLabs check: [\(liveResult.text)]")
+} else {
+    print("○ Live ElevenLabs check skipped (set KANSO_LIVE_ELEVENLABS=1 + ELEVENLABS_API_KEY to run)")
+}
+// Code-review fix: factory passes trimmed key/model strings into configs.
+@MainActor
+func testTrimmedFactoryCredentials() async {
+    let suite = "test.trimmed.factory.\(UUID().uuidString)"
+    let defaults = UserDefaults(suiteName: suite)!
+    defaults.set(STTProviderMode.deepgram.rawValue, forKey: "stt_provider_mode")
+    defaults.set("  dg-spaced-key  ", forKey: "deepgram_api_key")
+    defaults.set("  nova-3  ", forKey: "deepgram_model")
+    let built = DictationCoordinator.makeEngineFromPreferences(defaults: defaults) as! DeepgramSTTEngine
+    assert(built.config.apiKey == "dg-spaced-key", "Factory must pass trimmed key, got [\(built.config.apiKey ?? "nil")]")
+    assert(built.config.model == "nova-3", "Factory must pass trimmed model, got [\(built.config.model)]")
+    defaults.removePersistentDomain(forName: suite)
+}
+
+await testTrimmedFactoryCredentials()
+print("✔ DictationCoordinator trimmed credentials verified")
 print("All KansoCore tests passed successfully! 🎉")
