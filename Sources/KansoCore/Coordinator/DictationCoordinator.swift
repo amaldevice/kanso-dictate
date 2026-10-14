@@ -111,6 +111,42 @@ public final class DictationCoordinator: ObservableObject {
                 apiToken: (apiToken?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ? apiToken : nil
             )
             return CloudflareSTTEngine(config: config)
+        case .assemblyai:
+            let apiKey = defaults.string(forKey: "assemblyai_api_key")
+            let rawModel = defaults.string(forKey: "assemblyai_model") ?? AssemblyAISTTConfig.defaultModel
+            let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            let config = AssemblyAISTTConfig(
+                apiKey: (apiKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ? apiKey : nil,
+                model: trimmed.isEmpty ? AssemblyAISTTConfig.defaultModel : trimmed
+            )
+            return AssemblyAISTTEngine(config: config)
+        case .speechmatics:
+            let apiKey = defaults.string(forKey: "speechmatics_api_key")
+            let rawModel = defaults.string(forKey: "speechmatics_model") ?? SpeechmaticsSTTConfig.defaultModel
+            let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            let config = SpeechmaticsSTTConfig(
+                apiKey: (apiKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ? apiKey : nil,
+                model: trimmed.isEmpty ? SpeechmaticsSTTConfig.defaultModel : trimmed
+            )
+            return SpeechmaticsSTTEngine(config: config)
+        case .revai:
+            let apiKey = defaults.string(forKey: "revai_api_key")
+            let rawModel = defaults.string(forKey: "revai_model") ?? RevAISTTConfig.defaultModel
+            let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            let config = RevAISTTConfig(
+                apiKey: (apiKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ? apiKey : nil,
+                model: trimmed.isEmpty ? RevAISTTConfig.defaultModel : trimmed
+            )
+            return RevAISTTEngine(config: config)
+        case .elevenlabs:
+            let apiKey = defaults.string(forKey: "elevenlabs_api_key")
+            let rawModel = defaults.string(forKey: "elevenlabs_model") ?? ElevenLabsSTTConfig.defaultModel
+            let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+            let config = ElevenLabsSTTConfig(
+                apiKey: (apiKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false) ? apiKey : nil,
+                model: trimmed.isEmpty ? ElevenLabsSTTConfig.defaultModel : trimmed
+            )
+            return ElevenLabsSTTEngine(config: config)
         }
     }
 

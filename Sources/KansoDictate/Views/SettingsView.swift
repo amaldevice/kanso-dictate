@@ -15,6 +15,14 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var deepgramModel: String
     @Published public var cloudflareAccountID: String
     @Published public var cloudflareApiToken: String
+    @Published public var assemblyaiApiKey: String
+    @Published public var assemblyaiModel: String
+    @Published public var speechmaticsApiKey: String
+    @Published public var speechmaticsModel: String
+    @Published public var revaiApiKey: String
+    @Published public var revaiModel: String
+    @Published public var elevenlabsApiKey: String
+    @Published public var elevenlabsModel: String
     @Published public var isAccessibilityGranted: Bool
 
     public var onSettingsChanged: (@MainActor () -> Void)?
@@ -34,6 +42,14 @@ public final class SettingsViewModel: ObservableObject {
         self.deepgramModel = UserDefaults.standard.string(forKey: "deepgram_model") ?? DeepgramSTTConfig.defaultModel
         self.cloudflareAccountID = UserDefaults.standard.string(forKey: "cloudflare_account_id") ?? ""
         self.cloudflareApiToken = UserDefaults.standard.string(forKey: "cloudflare_api_token") ?? ""
+        self.assemblyaiApiKey = UserDefaults.standard.string(forKey: "assemblyai_api_key") ?? ""
+        self.assemblyaiModel = UserDefaults.standard.string(forKey: "assemblyai_model") ?? AssemblyAISTTConfig.defaultModel
+        self.speechmaticsApiKey = UserDefaults.standard.string(forKey: "speechmatics_api_key") ?? ""
+        self.speechmaticsModel = UserDefaults.standard.string(forKey: "speechmatics_model") ?? SpeechmaticsSTTConfig.defaultModel
+        self.revaiApiKey = UserDefaults.standard.string(forKey: "revai_api_key") ?? ""
+        self.revaiModel = UserDefaults.standard.string(forKey: "revai_model") ?? RevAISTTConfig.defaultModel
+        self.elevenlabsApiKey = UserDefaults.standard.string(forKey: "elevenlabs_api_key") ?? ""
+        self.elevenlabsModel = UserDefaults.standard.string(forKey: "elevenlabs_model") ?? ElevenLabsSTTConfig.defaultModel
         self.isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
     }
 
@@ -50,6 +66,14 @@ public final class SettingsViewModel: ObservableObject {
         UserDefaults.standard.set(deepgramModel, forKey: "deepgram_model")
         UserDefaults.standard.set(cloudflareAccountID, forKey: "cloudflare_account_id")
         UserDefaults.standard.set(cloudflareApiToken, forKey: "cloudflare_api_token")
+        UserDefaults.standard.set(assemblyaiApiKey, forKey: "assemblyai_api_key")
+        UserDefaults.standard.set(assemblyaiModel, forKey: "assemblyai_model")
+        UserDefaults.standard.set(speechmaticsApiKey, forKey: "speechmatics_api_key")
+        UserDefaults.standard.set(speechmaticsModel, forKey: "speechmatics_model")
+        UserDefaults.standard.set(revaiApiKey, forKey: "revai_api_key")
+        UserDefaults.standard.set(revaiModel, forKey: "revai_model")
+        UserDefaults.standard.set(elevenlabsApiKey, forKey: "elevenlabs_api_key")
+        UserDefaults.standard.set(elevenlabsModel, forKey: "elevenlabs_model")
         onSettingsChanged?()
     }
 
@@ -98,6 +122,10 @@ public struct SettingsView: View {
                     Text("Gemini (Free Tier)").tag(STTProviderMode.gemini)
                     Text("Deepgram (Free Tier)").tag(STTProviderMode.deepgram)
                     Text("Cloudflare (Free Tier)").tag(STTProviderMode.cloudflare)
+                    Text("AssemblyAI ($50)").tag(STTProviderMode.assemblyai)
+                    Text("Speechmatics ($100)").tag(STTProviderMode.speechmatics)
+                    Text("Rev.ai (5h)").tag(STTProviderMode.revai)
+                    Text("ElevenLabs").tag(STTProviderMode.elevenlabs)
                 }
                 .pickerStyle(.segmented)
                 .onChange(of: viewModel.providerMode) { viewModel.save() }
@@ -152,6 +180,54 @@ public struct SettingsView: View {
                         .onChange(of: viewModel.cloudflareApiToken) { viewModel.save() }
 
                     Text("Cloud transcription via Cloudflare Workers AI (~$0.0005/min + daily free Neurons). Audio leaves the device, unlike Local mode.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else if viewModel.providerMode == .assemblyai {
+                    SecureField("API Key (AssemblyAI):", text: $viewModel.assemblyaiApiKey)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.assemblyaiApiKey) { viewModel.save() }
+
+                    TextField("Model Name:", text: $viewModel.assemblyaiModel)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.assemblyaiModel) { viewModel.save() }
+
+                    Text("Cloud transcription via AssemblyAI $50 credit (no card). Audio leaves the device, unlike Local mode.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else if viewModel.providerMode == .speechmatics {
+                    SecureField("API Key (Speechmatics):", text: $viewModel.speechmaticsApiKey)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.speechmaticsApiKey) { viewModel.save() }
+
+                    TextField("Model Name:", text: $viewModel.speechmaticsModel)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.speechmaticsModel) { viewModel.save() }
+
+                    Text("Cloud transcription via Speechmatics $100 grant. Audio leaves the device, unlike Local mode.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else if viewModel.providerMode == .revai {
+                    SecureField("Access Token (Rev.ai):", text: $viewModel.revaiApiKey)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.revaiApiKey) { viewModel.save() }
+
+                    TextField("Model Name:", text: $viewModel.revaiModel)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.revaiModel) { viewModel.save() }
+
+                    Text("Cloud transcription via Rev.ai 5 free hours. Audio leaves the device, unlike Local mode.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                } else if viewModel.providerMode == .elevenlabs {
+                    SecureField("API Key (ElevenLabs):", text: $viewModel.elevenlabsApiKey)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.elevenlabsApiKey) { viewModel.save() }
+
+                    TextField("Model Name:", text: $viewModel.elevenlabsModel)
+                        .textFieldStyle(.roundedBorder)
+                        .onChange(of: viewModel.elevenlabsModel) { viewModel.save() }
+
+                    Text("Cloud transcription via ElevenLabs Scribe (~12 min/mo free). Audio leaves the device, unlike Local mode.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                 } else {
