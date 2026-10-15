@@ -1,5 +1,7 @@
 import SwiftUI
 import KansoCore
+import AVFoundation
+import AppKit
 
 @MainActor
 public final class SettingsViewModel: ObservableObject {
@@ -24,9 +26,9 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var elevenlabsApiKey: String
     @Published public var elevenlabsModel: String
     @Published public var isAccessibilityGranted: Bool
-
+    @Published public var isMicrophoneGranted: Bool
+    @Published public var isInputMonitoringGranted: Bool
     public var onSettingsChanged: (@MainActor () -> Void)?
-
     public init(onSettingsChanged: (@MainActor () -> Void)? = nil) {
         self.onSettingsChanged = onSettingsChanged
         let rawMode = UserDefaults.standard.string(forKey: "stt_provider_mode") ?? STTProviderMode.remote.rawValue
@@ -51,6 +53,8 @@ public final class SettingsViewModel: ObservableObject {
         self.elevenlabsApiKey = UserDefaults.standard.string(forKey: "elevenlabs_api_key") ?? ""
         self.elevenlabsModel = UserDefaults.standard.string(forKey: "elevenlabs_model") ?? ElevenLabsSTTConfig.defaultModel
         self.isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
+        self.isMicrophoneGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        self.isInputMonitoringGranted = EventTapManager.isInputMonitoringAllowed()
     }
 
     public func save() {
@@ -85,12 +89,23 @@ public final class SettingsViewModel: ObservableObject {
 
     public func refreshPermissions() {
         isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
+        isMicrophoneGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        isInputMonitoringGranted = EventTapManager.isInputMonitoringAllowed()
     }
 
-    public func requestPermissions() {
-        _ = EventTapManager.isAccessibilityTrusted(prompt: true)
-        refreshPermissions()
+
+    public func openInputMonitoringSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
+            NSWorkspace.shared.open(url)
+        }
     }
+
+    public func openSystemSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
 }
 
 public struct SettingsView: View {
@@ -295,21 +310,77 @@ public struct SettingsView: View {
             Section("Permissions") {
                 HStack {
                     Label(
-                        "Accessibility Privileges",
+                        "Accessibility — \(viewModel.isAccessibilityGranted ? "Granted" : "Not Granted")",
                         systemImage: viewModel.isAccessibilityGranted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
                     )
                     .foregroundColor(viewModel.isAccessibilityGranted ? .green : .orange)
 
                     Spacer()
 
+                    Button("Refresh Status") {
+                        viewModel.refreshPermissions()
+                    }
                     if !viewModel.isAccessibilityGranted {
                         Button("Grant Access") {
-                            viewModel.requestPermissions()
+                            _ = EventTapManager.isAccessibilityTrusted(prompt: true)
+                            viewModel.refreshPermissions()
+                        }
+                    }
+                    Button("Open System Settings") {
+                        viewModel.openSystemSettings()
+                    }
+                }
+
+                Text("Required for controlling apps and synthetic paste. Global hotkey also requires Input Monitoring.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                HStack {
+                    Label(
+                        "Input Monitoring — \(viewModel.isInputMonitoringGranted ? "Granted" : "Not Granted")",
+                        systemImage: viewModel.isInputMonitoringGranted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                    )
+                    .foregroundColor(viewModel.isInputMonitoringGranted ? .green : .orange)
+
+                    Spacer()
+
+                    Button("Refresh Status") {
+                        viewModel.refreshPermissions()
+                    }
+                    if !viewModel.isInputMonitoringGranted {
+                        Button("Request Access") {
+                            _ = EventTapManager.requestInputMonitoring()
+                            viewModel.refreshPermissions()
+                        }
+                    }
+                    Button("Open System Settings") {
+                        viewModel.openInputMonitoringSettings()
+                    }
+                }
+
+                Text(viewModel.isInputMonitoringGranted ? "Granted — global Option key monitoring is authorized." : "Required to detect Option globally. Enable Kanso Dictate under System Settings → Privacy & Security → Input Monitoring.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                HStack {
+                    Label(
+                        "Microphone — \(viewModel.isMicrophoneGranted ? "Granted" : "Not Granted")",
+                        systemImage: viewModel.isMicrophoneGranted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                    )
+                    .foregroundColor(viewModel.isMicrophoneGranted ? .green : .orange)
+
+                    Spacer()
+
+                    if !viewModel.isMicrophoneGranted {
+                        Button("Grant Access") {
+                            AVCaptureDevice.requestAccess(for: .audio) { _ in
+                                Task { @MainActor in viewModel.refreshPermissions() }
+                            }
                         }
                     }
                 }
 
-                Text("Required for Push-To-Talk key interception and synthetic paste into active apps.")
+                Text(viewModel.isMicrophoneGranted ? "Granted — audio capture ready." : "Required for audio capture. macOS prompts once; if denied, enable in System Settings → Privacy → Microphone.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -318,6 +389,10 @@ public struct SettingsView: View {
         }
         .frame(minWidth: 480, minHeight: 460)
         .onAppear {
+            viewModel.refreshPermissions()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // User may have flipped a TCC toggle in System Settings; re-check on return.
             viewModel.refreshPermissions()
         }
     }

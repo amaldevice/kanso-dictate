@@ -124,24 +124,33 @@ public final class GeminiSTTEngine: SpeechToTextEngine, @unchecked Sendable {
     ) async throws -> TranscriptionResult {
         let startTime = CFAbsoluteTimeGetCurrent()
         let request = try buildRequest(audioData: audioData, language: language, prompt: prompt)
-
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            throw STTError.networkError(error.localizedDescription)
+        // ponytail: fixed 2-retry backoff for transient 503 overload; exponential schedule if spikes persist
+        var lastError: STTError?
+        for attempt in 0..<3 {
+            if attempt > 0 {
+                try await Task.sleep(nanoseconds: UInt64(attempt) * 1_500_000_000)
+            }
+            do {
+                let (data, response) = try await session.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    throw STTError.networkError("Invalid non-HTTP response received.")
+                }
+                guard (200...299).contains(http.statusCode) else {
+                    let mapped = mapHTTPError(statusCode: http.statusCode, serverMessage: parseErrorMessage(from: data, statusCode: http.statusCode))
+                    if http.statusCode == 503, attempt < 2 {
+                        lastError = mapped
+                        continue
+                    }
+                    throw mapped
+                }
+                return try parseSuccessResponse(from: data, fallbackDuration: CFAbsoluteTimeGetCurrent() - startTime)
+            } catch let err as STTError {
+                throw err
+            } catch {
+                throw STTError.networkError(error.localizedDescription)
+            }
         }
-
-        let elapsed = CFAbsoluteTimeGetCurrent() - startTime
-        guard let http = response as? HTTPURLResponse else {
-            throw STTError.networkError("Invalid non-HTTP response received.")
-        }
-        guard (200...299).contains(http.statusCode) else {
-            throw mapHTTPError(statusCode: http.statusCode, serverMessage: parseErrorMessage(from: data, statusCode: http.statusCode))
-        }
-
-        return try parseSuccessResponse(from: data, fallbackDuration: elapsed)
+        throw lastError ?? STTError.networkError("Gemini service unavailable after retries.")
     }
 
     private func mapHTTPError(statusCode: Int, serverMessage: String) -> STTError {
@@ -154,6 +163,8 @@ public final class GeminiSTTEngine: SpeechToTextEngine, @unchecked Sendable {
             return .httpError(statusCode: statusCode, message: "Gemini model not found (check model name): \(serverMessage)")
         case 429:
             return .httpError(statusCode: statusCode, message: "Gemini quota exceeded: \(serverMessage)")
+        case 503:
+            return .httpError(statusCode: statusCode, message: "Gemini sedang sibuk (overload sementara). Coba lagi beberapa detik. Detail: \(serverMessage)")
         case 500...599:
             return .httpError(statusCode: statusCode, message: "Gemini service unavailable (HTTP \(statusCode)): \(serverMessage)")
         default:

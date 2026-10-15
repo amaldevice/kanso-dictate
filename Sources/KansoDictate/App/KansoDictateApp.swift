@@ -57,11 +57,67 @@ public final class WindowManager: ObservableObject {
     }
 }
 
+@MainActor
+public final class HotkeyService: ObservableObject {
+    public let manager = EventTapManager()
+    @Published public private(set) var isTapRunning = false
+    private weak var coordinator: DictationCoordinator?
+
+    public init() {}
+
+    public func attach(coordinator: DictationCoordinator) {
+        self.coordinator = coordinator
+        manager.onKeyDown = { [weak coordinator] in
+            Task { @MainActor in
+                coordinator?.startDictation()
+            }
+        }
+        manager.onKeyUp = { [weak coordinator] in
+            Task { @MainActor in
+                coordinator?.stopDictation()
+            }
+        }
+    }
+
+    @discardableResult
+    public func start() -> Bool {
+        manager.resyncModifierState()
+        isTapRunning = manager.start()
+        return isTapRunning
+    }
+
+    /// Stops and recreates the tap (use after granting permissions or ad-hoc re-sign).
+    @discardableResult
+    public func restart() -> Bool {
+        manager.stop()
+        isTapRunning = false
+        return start()
+    }
+
+    public func resync() {
+        manager.resyncModifierState()
+    }
+}
+
+@MainActor
+public final class HotkeyStatus: ObservableObject {
+    @Published public var isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
+    @Published public var isInputMonitoringGranted = EventTapManager.isInputMonitoringAllowed()
+    public var isActive: Bool { isAccessibilityGranted && isInputMonitoringGranted }
+    public init() {}
+    public func refresh() {
+        isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
+        isInputMonitoringGranted = EventTapManager.isInputMonitoringAllowed()
+    }
+}
+
+
 public struct KansoDictateApp: App {
     @StateObject private var coordinator: DictationCoordinator
     @StateObject private var windowManager = WindowManager()
     @StateObject private var hudController: FloatingHUDController
-    private let eventTapManager = EventTapManager()
+    @StateObject private var hotkeyStatus = HotkeyStatus()
+    @StateObject private var hotkeyService = HotkeyService()
 
     public init() {
         let coordinatorInstance = DictationCoordinator()
@@ -74,25 +130,30 @@ public struct KansoDictateApp: App {
             NSLog("KansoDictate Error: %@", message)
         }
 
-        // Prompt for Accessibility on startup so macOS shows the System Settings authorization dialog
-        if !EventTapManager.isAccessibilityTrusted(prompt: true) {
-            NSLog("KansoDictate: Requesting Accessibility permission...")
-        }
+        // First-run: request mic + Accessibility together so Option hotkey works immediately after grant.
+        PermissionOnboarding.requestIfNeeded()
 
-        // Setup Option Push-To-Talk
-        eventTapManager.onKeyDown = { [weak coordinatorInstance] in
+        // Setup Option Push-To-Talk (either Left or Right Option).
+        // HotkeyService is a StateObject so the tap survives App value recreations.
+        let hotkeyServiceInstance = HotkeyService()
+        hotkeyServiceInstance.attach(coordinator: coordinatorInstance)
+        _hotkeyService = StateObject(wrappedValue: hotkeyServiceInstance)
+        hotkeyServiceInstance.start()
+
+        // Re-check permissions + tap whenever the app becomes active again
+        // (macOS sends no notification when the user flips a TCC toggle).
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak hotkeyServiceInstance] _ in
             Task { @MainActor in
-                coordinatorInstance?.startDictation()
+                hotkeyServiceInstance?.resync()
+                if hotkeyServiceInstance?.manager.isRunning == false {
+                    _ = hotkeyServiceInstance?.start()
+                }
             }
         }
-
-        eventTapManager.onKeyUp = { [weak coordinatorInstance] in
-            Task { @MainActor in
-                coordinatorInstance?.stopDictation()
-            }
-        }
-
-        eventTapManager.start()
     }
     private var menuBarTitle: String {
         switch coordinator.state {
@@ -144,10 +205,22 @@ public struct KansoDictateApp: App {
             Text(statusMessage)
                 .font(.headline)
                 .help(statusMessage)
+                .onAppear { hotkeyStatus.refresh() }
 
             Text("Engine: \(coordinator.activeEngine.displayName)")
                 .font(.caption)
                 .foregroundColor(.secondary)
+            if !hotkeyStatus.isActive {
+                Text(hotkeyStatus.isInputMonitoringGranted
+                     ? "⚠️ Option hotkey OFF — grant Accessibility in Settings"
+                     : "⚠️ Option hotkey OFF — grant Input Monitoring in Settings")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+            } else if !hotkeyService.isTapRunning {
+                Text("⚠️ Option hotkey tap not running — use Restart Hotkey below")
+                    .font(.caption)
+                    .foregroundColor(.orange)
+            }
 
             Divider()
             if coordinator.state == .recording {
@@ -156,8 +229,14 @@ public struct KansoDictateApp: App {
                 }
             } else {
                 Button("Start Dictation (or Hold ⌥)") {
+                    hotkeyService.resync()
                     coordinator.startDictation()
                 }
+            }
+
+            Button("Restart Hotkey Tap") {
+                hotkeyStatus.refresh()
+                hotkeyService.restart()
             }
 
 
@@ -177,6 +256,12 @@ public struct KansoDictateApp: App {
                 NSApplication.shared.terminate(nil)
             }
             .keyboardShortcut("q")
+        }
+        .onChange(of: coordinator.state) { _ in
+            if coordinator.state == .idle {
+                hotkeyService.resync()
+                hotkeyStatus.refresh()
+            }
         }
     }
 }
