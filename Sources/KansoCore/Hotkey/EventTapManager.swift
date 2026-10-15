@@ -8,14 +8,24 @@ public final class EventTapManager: @unchecked Sendable {
         public static let rightOptionKeyCode: Int64 = 0x3D // 61 decimal
         public static let leftOptionKeyCode: Int64 = 0x3A  // 58 decimal
         public static let alternateMask: UInt64 = CGEventFlags.maskAlternate.rawValue // 0x0008_0000
-        public static let rightOptionMask: UInt64 = 0x0020_0000 // NX_DEVICERALTKEYMASK
+        // Device-dependent masks from <IOKit/hidsystem/IOLLEvent.h> (NOT maskNumericPad 0x200000).
+        public static let leftOptionMask: UInt64 = 0x0000_0020 // NX_DEVICELALTKEYMASK
+        public static let rightOptionMask: UInt64 = 0x0000_0040 // NX_DEVICERALTKEYMASK
     }
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
+    private var workerThread: Thread?
+    private var workerRunLoop: CFRunLoop?
     private var retryTimer: Timer?
     private let lock = NSLock()
     private var isKeyPressed = false
+
+    public var isRunning: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return eventTap != nil
+    }
 
     public var onKeyDown: (@Sendable () -> Void)?
     public var onKeyUp: (@Sendable () -> Void)?
@@ -82,39 +92,68 @@ public final class EventTapManager: @unchecked Sendable {
         retryTimer?.invalidate()
         retryTimer = nil
 
-        self.eventTap = tap
         let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        self.eventTap = tap
         self.runLoopSource = source
+        self.workerRunLoop = nil
 
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
-        CGEvent.tapEnable(tap: tap, enable: true)
+        // Dedicated worker thread: keeps tap alive during menu tracking,
+        // window dragging, and SwiftUI/audio work on the main thread.
+        let worker = Thread { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            guard let currentTap = self.eventTap, let currentSource = self.runLoopSource else {
+                self.lock.unlock()
+                return
+            }
+            self.workerRunLoop = CFRunLoopGetCurrent()
+            let loop = self.workerRunLoop
+            self.lock.unlock()
+
+            guard let loop else { return }
+            CFRunLoopAddSource(loop, currentSource, .commonModes)
+            CGEvent.tapEnable(tap: currentTap, enable: true)
+            CFRunLoopRun()
+        }
+        worker.name = "dev.kanso-dictate.eventtap"
+        worker.qualityOfService = .userInteractive
+        self.workerThread = worker
+        worker.start()
+
         NSLog("KansoDictate: Global hotkey event tap established successfully.")
         return true
     }
 
-    /// Stops the active event tap and removes it from the run loop.
+    /// Stops the active event tap and its worker thread.
     public func stop() {
         lock.lock()
-        defer { lock.unlock() }
-
+        let tap = eventTap
+        let source = runLoopSource
+        let runLoop = workerRunLoop
         retryTimer?.invalidate()
         retryTimer = nil
-
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            if let source = runLoopSource {
-                CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
-                self.runLoopSource = nil
-            }
-            self.eventTap = nil
-        }
+        eventTap = nil
+        runLoopSource = nil
+        workerRunLoop = nil
+        workerThread = nil
         isKeyPressed = false
+        lock.unlock()
+
+        if let tap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            if let source, let runLoop {
+                CFRunLoopRemoveSource(runLoop, source, .commonModes)
+                CFRunLoopStop(runLoop)
+            }
+        }
     }
 
     /// Re-reads live modifier state; drops a stuck KeyDown when Option was released while tap was disabled.
     public func resyncModifierState() {
         let flags = CGEventSource.flagsState(.combinedSessionState).rawValue
         let optionDown = (flags & Constants.alternateMask) != 0
+            || (flags & Constants.leftOptionMask) != 0
+            || (flags & Constants.rightOptionMask) != 0
         lock.lock()
         let wasDown = isKeyPressed
         if wasDown, !optionDown {
@@ -144,8 +183,13 @@ public final class EventTapManager: @unchecked Sendable {
         type: CGEventType,
         event: CGEvent
     ) -> Unmanaged<CGEvent>? {
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput, let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: true)
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            lock.lock()
+            let tap = eventTap
+            lock.unlock()
+            if let tap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
             return Unmanaged.passUnretained(event)
         }
         guard type == .flagsChanged else {
@@ -153,26 +197,41 @@ public final class EventTapManager: @unchecked Sendable {
         }
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-        let isOptionKey = (keyCode == Constants.rightOptionKeyCode || keyCode == Constants.leftOptionKeyCode || keyCode == 61 || keyCode == 58)
-        let flags = event.flags.rawValue
-        let isAlternateDown = (flags & Constants.alternateMask) != 0
+        let rawFlags = event.flags.rawValue
+        let leftDown = (rawFlags & Constants.leftOptionMask) != 0
+        let rightDown = (rawFlags & Constants.rightOptionMask) != 0
+        let alternateDown = (rawFlags & Constants.alternateMask) != 0
 
-        // Handle Option key transitions (Right or Left Option)
-        if isOptionKey || isAlternateDown != isKeyPressed {
-            let isDown = isAlternateDown
-
+        let isLeftKey = (keyCode == Constants.leftOptionKeyCode)
+        let isRightKey = (keyCode == Constants.rightOptionKeyCode)
+        let isDown: Bool
+        if isLeftKey {
+            isDown = leftDown || alternateDown
+        } else if isRightKey {
+            isDown = rightDown || alternateDown
+        } else {
+            // Another modifier changed; only act if the Option state itself flipped
+            // (clears a stuck KeyDown when Option was released while tap was off).
+            isDown = alternateDown || leftDown || rightDown
             lock.lock()
-            let previousState = isKeyPressed
-            isKeyPressed = isDown
+            let current = isKeyPressed
             lock.unlock()
-
-            if isDown && !previousState {
-                NSLog("KansoDictate: Option KeyDown detected (keyCode: %lld)", keyCode)
-                onKeyDown?()
-            } else if !isDown && previousState {
-                NSLog("KansoDictate: Option KeyUp detected (keyCode: %lld)", keyCode)
-                onKeyUp?()
+            if isDown == current {
+                return Unmanaged.passUnretained(event)
             }
+        }
+
+        lock.lock()
+        let previousState = isKeyPressed
+        isKeyPressed = isDown
+        lock.unlock()
+
+        if isDown && !previousState {
+            NSLog("KansoDictate: Option KeyDown detected (keyCode: %lld)", keyCode)
+            onKeyDown?()
+        } else if !isDown && previousState {
+            NSLog("KansoDictate: Option KeyUp detected (keyCode: %lld)", keyCode)
+            onKeyUp?()
         }
 
         return Unmanaged.passUnretained(event)

@@ -214,7 +214,8 @@ print("✔ HistoryStore add, persist, and clear verified")
 
 // Test 13: EventTapManager Constants & Accessibility Inspection
 assert(EventTapManager.Constants.rightOptionKeyCode == 0x3D, "Right Option keycode must be 0x3D")
-assert(EventTapManager.Constants.rightOptionMask == 0x0020_0000, "Right Option mask must be 0x0020_0000")
+assert(EventTapManager.Constants.rightOptionMask == 0x40, "Right Option mask must be NX_DEVICERALTKEYMASK (0x40), not maskNumericPad")
+assert(EventTapManager.Constants.leftOptionMask == 0x20, "Left Option mask must be NX_DEVICELALTKEYMASK (0x20)")
 _ = EventTapManager.isAccessibilityTrusted(prompt: false)
 print("✔ EventTapManager constants and permission inspection verified")
 // Test 14: WhisperKitConfig Defaults & Initialization

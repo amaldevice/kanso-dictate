@@ -317,13 +317,17 @@ public struct SettingsView: View {
 
                     Spacer()
 
-                    Button("Open System Settings") {
-                        viewModel.openSystemSettings()
+                    Button("Refresh Status") {
+                        viewModel.refreshPermissions()
                     }
                     if !viewModel.isAccessibilityGranted {
                         Button("Grant Access") {
                             _ = EventTapManager.isAccessibilityTrusted(prompt: true)
+                            viewModel.refreshPermissions()
                         }
+                    }
+                    Button("Open System Settings") {
+                        viewModel.openSystemSettings()
                     }
                 }
 
@@ -385,6 +389,10 @@ public struct SettingsView: View {
         }
         .frame(minWidth: 480, minHeight: 460)
         .onAppear {
+            viewModel.refreshPermissions()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // User may have flipped a TCC toggle in System Settings; re-check on return.
             viewModel.refreshPermissions()
         }
     }
