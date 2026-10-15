@@ -13,3 +13,8 @@ DerivedData/
 
 # Git worktrees
 .worktrees/
+
+# Local docs (planning & research) — kept locally, not versioned.
+# Exception: docs/agents/ stays tracked (agent skills reference it).
+docs/*.md
+docs/research/*.md
