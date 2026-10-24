@@ -97,6 +97,10 @@ public final class SettingsViewModel: ObservableObject {
         isInputMonitoringGranted = EventTapManager.isInputMonitoringAllowed()
     }
 
+    public var allPermissionsGranted: Bool {
+        isAccessibilityGranted && isInputMonitoringGranted && isMicrophoneGranted
+    }
+
 
     public func openInputMonitoringSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
@@ -391,6 +395,21 @@ public struct SettingsView: View {
                 Text(viewModel.isMicrophoneGranted ? "Granted — audio capture ready." : "Required for audio capture. macOS prompts once; if denied, enable in System Settings → Privacy → Microphone.")
                     .font(.caption)
                     .foregroundColor(.secondary)
+
+                if !viewModel.allPermissionsGranted {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label("Already ON in System Settings but still Not Granted here?", systemImage: "arrow.triangle.2.circlepath")
+                            .font(.caption.bold())
+                            .foregroundColor(.orange)
+                        Text("The stored grant belongs to a previous build of the app. In System Settings → Privacy & Security, select Kanso Dictate in the permission list, click the − button to remove it, click + to re-add it, then turn the toggle ON. Toggling off and on is not enough.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.orange.opacity(0.08))
+                    .cornerRadius(6)
+                }
             }
         }
         .padding()
