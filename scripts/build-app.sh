@@ -34,19 +34,19 @@ if [[ -n "${KANSO_CODESIGN_KEYCHAIN:-}" ]]; then
     KEYCHAIN_ARGS=(--keychain "${KANSO_CODESIGN_KEYCHAIN}")
 fi
 
+SIGNER="-"
 if [[ -n "${IDENTITY}" ]]; then
+    SIGNER="${IDENTITY}"
     echo "==> Codesigning with stable identity '${IDENTITY}' (TCC grants survive rebuilds)..."
-    codesign --force --sign "${IDENTITY}" ${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"} \
-        --entitlements "Sources/KansoDictate/Resources/KansoDictate.entitlements" \
-        "${BUNDLE_DIR}"
 else
     echo "==> WARNING: KANSO_CODESIGN_IDENTITY not set; falling back to ad-hoc signing." >&2
     echo "==>          macOS will silently revoke Accessibility / Input Monitoring /" >&2
     echo "==>          Microphone after every rebuild: the System Settings toggle stays" >&2
     echo "==>          ON but the app reports Not Granted. See README 'Stable Signing'." >&2
-    codesign --force --sign - \
-        --entitlements "Sources/KansoDictate/Resources/KansoDictate.entitlements" \
-        "${BUNDLE_DIR}"
 fi
+
+codesign --force --sign "${SIGNER}" ${KEYCHAIN_ARGS[@]+"${KEYCHAIN_ARGS[@]}"} \
+    --entitlements "Sources/KansoDictate/Resources/KansoDictate.entitlements" \
+    "${BUNDLE_DIR}"
 
 echo "==> Successfully packaged ${BUNDLE_DIR}"

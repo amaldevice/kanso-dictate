@@ -108,6 +108,10 @@ public final class SettingsViewModel: ObservableObject {
 
     private var permissionPollTimer: Timer?
 
+    /// The NSWindow hosting the Settings view, reported by HostingWindowFinder;
+    /// used to stop the poll exactly when that window closes.
+    public var hostingWindow: NSWindow?
+
     /// macOS emits no notification when a TCC toggle flips in System Settings,
     /// so poll while the Settings window is open and something is still missing.
     /// Auto-stops once every permission is granted.
@@ -451,13 +455,39 @@ public struct SettingsView: View {
             viewModel.stopPermissionPolling()
         }
         // The settings window is cached (isReleasedWhenClosed = false), so
-        // onDisappear may never fire; stop polling on window close as well.
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { _ in
-            viewModel.stopPermissionPolling()
+        // onDisappear may never fire; stop polling when OUR window closes.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { note in
+            if let closing = note.object as? NSWindow, closing === viewModel.hostingWindow {
+                viewModel.stopPermissionPolling()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             // User may have flipped a TCC toggle in System Settings; re-check on return.
             viewModel.refreshPermissions()
         }
+        .background(HostingWindowFinder { viewModel.hostingWindow = $0 })
+    }
+}
+
+/// Reports the NSWindow hosting this view, so the permission poll can be
+/// stopped exactly when that window closes.
+private struct HostingWindowFinder: NSViewRepresentable {
+    final class FinderView: NSView {
+        var onWindowChanged: ((NSWindow?) -> Void)?
+        override func viewDidMoveToWindow() {
+            onWindowChanged?(window)
+        }
+    }
+
+    let onWindowChanged: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> FinderView {
+        let view = FinderView()
+        view.onWindowChanged = onWindowChanged
+        return view
+    }
+
+    func updateNSView(_ view: FinderView, context: Context) {
+        view.onWindowChanged = onWindowChanged
     }
 }
