@@ -1,5 +1,7 @@
 # kanso-dictate (簡素)
 
+<p align="center"><img src="docs/assets/app-icon-1024.png" width="180" alt="Kanso Dictate app icon"></p>
+
 > **Kanso (簡素)**: Japanese aesthetic of simplicity, eliminating clutter to reveal the core essence.
 
 A minimalist, high-performance, local-first macOS dictation assistant written in pure Swift 6, engineered from scratch for Apple Silicon (macOS 14+).
@@ -132,6 +134,14 @@ macOS ties privacy grants (Accessibility, Input Monitoring, Microphone) to the a
    # designated => identifier "com.amaldevice.KansoDictate" and certificate leaf = H"…"
    ```
 
+### App Icon
+
+The Dock/Finder icon is built from the design source art in `docs/assets/` (the source ships with a glow that escapes the tile; the pipeline masks it to a clean rounded square). To regenerate after updating the art:
+
+```bash
+swift scripts/make-icon.swift docs/assets/kanso-dictate-icon-simplified.png Sources/KansoDictate/Resources/AppIcon.icns
+```
+
 ---
 
 ## How to Dictate
@@ -200,7 +210,8 @@ swift run KansoDictate --test-inject "Hello from Kanso Dictate!"
 kanso-dictate/
 ├── Package.swift                               # Dual-target Swift 6 package definition
 ├── scripts/
-│   └── build-app.sh                            # Automated .app packager with ad-hoc codesign
+│   ├── build-app.sh                            # Automated .app packager with codesign
+│   └── make-icon.swift                         # Art → masked .icns icon pipeline
 ├── Sources/
 │   ├── KansoCore/                              # Core domain & infrastructure library
 │   │   ├── Audio/

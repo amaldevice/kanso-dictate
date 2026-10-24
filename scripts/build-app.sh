@@ -28,6 +28,7 @@ cp "${BIN_PATH}" "${BUNDLE_DIR}/Contents/MacOS/KansoDictate"
 chmod +x "${BUNDLE_DIR}/Contents/MacOS/KansoDictate"
 ln -sf "KansoDictate" "${BUNDLE_DIR}/Contents/MacOS/${APP_NAME}"
 cp "Sources/KansoDictate/Resources/Info.plist" "${BUNDLE_DIR}/Contents/Info.plist"
+cp "Sources/KansoDictate/Resources/AppIcon.icns" "${BUNDLE_DIR}/Contents/Resources/AppIcon.icns"
 
 KEYCHAIN_ARGS=()
 if [[ -n "${KANSO_CODESIGN_KEYCHAIN:-}" ]]; then
