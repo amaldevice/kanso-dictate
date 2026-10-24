@@ -93,10 +93,10 @@ Commercial tools like Wispr Flow and Superwhisper wrap 120MB+ Electron container
 
 ## Quickstart & Installation
 
-### Option 1: Install Release Binary (Recommended)
+### Option 1: Install Release DMG (Recommended)
 
-1. Download the latest release archive (`Kanso-Dictate-v0.2.0-macos-arm64.zip`) from [Releases](https://github.com/amaldevice/kanso-dictate/releases).
-2. Unzip and drag `Kanso Dictate.app` into `/Applications`.
+1. Download the latest release (`Kanso-Dictate-vX.Y.Z-macos-arm64.dmg`) from [Releases](https://github.com/amaldevice/kanso-dictate/releases).
+2. Open the DMG and drag **Kanso Dictate** into the **Applications** folder.
 3. Open **Kanso Dictate** via Spotlight (`Cmd + Space`).
 4. Open **Settings...** from the menu bar. Enable **Accessibility** for app control/text insertion and **Input Monitoring** for the global Option hotkey under System Settings → Privacy & Security; refresh status in Settings.
 
@@ -115,6 +115,14 @@ cd kanso-dictate
 # Launch the app
 open "/Applications/Kanso Dictate.app"
 ```
+
+To package a distributable drag-to-Applications DMG instead of a bare `.app` (background, icon positions, and Applications symlink included):
+
+```bash
+./scripts/build-dmg.sh release   # → .build/bin/Kanso-Dictate-v<version>-macos-arm64.dmg
+```
+
+The DMG step drives Finder to lay out the window, so the terminal needs **Automation → Finder** permission once (System Settings → Privacy & Security → Automation); without it the DMG still builds with a default layout.
 
 ### Stable Signing (recommended)
 
@@ -211,6 +219,7 @@ kanso-dictate/
 ├── Package.swift                               # Dual-target Swift 6 package definition
 ├── scripts/
 │   ├── build-app.sh                            # Automated .app packager with codesign
+│   ├── build-dmg.sh                            # Drag-to-Applications DMG packager
 │   └── make-icon.swift                         # Art → masked .icns icon pipeline
 ├── Sources/
 │   ├── KansoCore/                              # Core domain & infrastructure library
