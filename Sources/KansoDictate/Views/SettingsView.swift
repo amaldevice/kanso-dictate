@@ -28,9 +28,12 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var isAccessibilityGranted: Bool
     @Published public var isMicrophoneGranted: Bool
     @Published public var isInputMonitoringGranted: Bool
+    @Published public var pttTrigger: PTTTriggerKey
     public var onSettingsChanged: (@MainActor () -> Void)?
+    public var onHotkeyChanged: (@MainActor (PTTTriggerKey) -> Void)?
     public init(onSettingsChanged: (@MainActor () -> Void)? = nil) {
         self.onSettingsChanged = onSettingsChanged
+        self.pttTrigger = PTTTriggerKey.load()
         let rawMode = UserDefaults.standard.string(forKey: "stt_provider_mode") ?? STTProviderMode.remote.rawValue
         self.providerMode = STTProviderMode(rawValue: rawMode) ?? .remote
         self.baseURL = UserDefaults.standard.string(forKey: "stt_base_url") ?? "https://api.groq.com/openai/v1"
@@ -78,6 +81,7 @@ public final class SettingsViewModel: ObservableObject {
         UserDefaults.standard.set(revaiModel, forKey: "revai_model")
         UserDefaults.standard.set(elevenlabsApiKey, forKey: "elevenlabs_api_key")
         UserDefaults.standard.set(elevenlabsModel, forKey: "elevenlabs_model")
+        pttTrigger.save()
         onSettingsChanged?()
     }
 
@@ -114,7 +118,8 @@ public struct SettingsView: View {
     public init(
         viewModel: SettingsViewModel? = nil,
         coordinator: DictationCoordinator? = nil,
-        onSettingsChanged: (@MainActor () -> Void)? = nil
+        onSettingsChanged: (@MainActor () -> Void)? = nil,
+        onHotkeyChanged: (@MainActor (PTTTriggerKey) -> Void)? = nil
     ) {
         let vm = viewModel ?? SettingsViewModel()
         if let coordinator = coordinator {
@@ -124,6 +129,9 @@ public struct SettingsView: View {
             }
         } else if let onSettingsChanged = onSettingsChanged {
             vm.onSettingsChanged = onSettingsChanged
+        }
+        if let onHotkeyChanged {
+            vm.onHotkeyChanged = onHotkeyChanged
         }
         self.viewModel = vm
     }
@@ -292,17 +300,17 @@ public struct SettingsView: View {
             }
 
             Section("Push-To-Talk Hotkey") {
-                HStack {
-                    Text("Trigger Key:")
-                    Spacer()
-                    Text("Right Option (⌥)")
-                        .bold()
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.secondary.opacity(0.15))
-                        .cornerRadius(6)
+                Picker("Trigger Key:", selection: $viewModel.pttTrigger) {
+                    ForEach(PTTTriggerKey.allCases, id: \.self) { trigger in
+                        Text(trigger.displayName).tag(trigger)
+                    }
                 }
-                Text("Hold the Right Option key to record, release to transcribe and paste.")
+                .pickerStyle(.menu)
+                .onChange(of: viewModel.pttTrigger) {
+                    viewModel.save()
+                    viewModel.onHotkeyChanged?(viewModel.pttTrigger)
+                }
+                Text("Hold the \(viewModel.pttTrigger.displayName) key to record, release to transcribe and paste.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
