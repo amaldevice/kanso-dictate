@@ -92,13 +92,41 @@ public final class SettingsViewModel: ObservableObject {
     }
 
     public func refreshPermissions() {
-        isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
-        isMicrophoneGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-        isInputMonitoringGranted = EventTapManager.isInputMonitoringAllowed()
+        // Assign only on change: with 1s polling below, unconditional assigns
+        // would republish (and re-render the form) every tick.
+        let accessibility = EventTapManager.isAccessibilityTrusted(prompt: false)
+        let microphone = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        let inputMonitoring = EventTapManager.isInputMonitoringAllowed()
+        if isAccessibilityGranted != accessibility { isAccessibilityGranted = accessibility }
+        if isMicrophoneGranted != microphone { isMicrophoneGranted = microphone }
+        if isInputMonitoringGranted != inputMonitoring { isInputMonitoringGranted = inputMonitoring }
     }
 
     public var allPermissionsGranted: Bool {
         isAccessibilityGranted && isInputMonitoringGranted && isMicrophoneGranted
+    }
+
+    private var permissionPollTimer: Timer?
+
+    /// macOS emits no notification when a TCC toggle flips in System Settings,
+    /// so poll while the Settings window is open and something is still missing.
+    /// Auto-stops once every permission is granted.
+    public func startPermissionPolling() {
+        guard !allPermissionsGranted, permissionPollTimer == nil else { return }
+        permissionPollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.refreshPermissions()
+                if self.allPermissionsGranted {
+                    self.stopPermissionPolling()
+                }
+            }
+        }
+    }
+
+    public func stopPermissionPolling() {
+        permissionPollTimer?.invalidate()
+        permissionPollTimer = nil
     }
 
 
@@ -417,6 +445,15 @@ public struct SettingsView: View {
         .frame(minWidth: 480, minHeight: 460)
         .onAppear {
             viewModel.refreshPermissions()
+            viewModel.startPermissionPolling()
+        }
+        .onDisappear {
+            viewModel.stopPermissionPolling()
+        }
+        // The settings window is cached (isReleasedWhenClosed = false), so
+        // onDisappear may never fire; stop polling on window close as well.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { _ in
+            viewModel.stopPermissionPolling()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             // User may have flipped a TCC toggle in System Settings; re-check on return.
