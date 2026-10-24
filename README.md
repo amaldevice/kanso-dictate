@@ -114,6 +114,24 @@ cd kanso-dictate
 open "/Applications/Kanso Dictate.app"
 ```
 
+### Stable Signing (recommended)
+
+macOS ties privacy grants (Accessibility, Input Monitoring, Microphone) to the app's **code-signing identity**. With ad-hoc signing (the default), every rebuild produces a new identity, so macOS silently revokes all three permissions after each reinstall — the System Settings toggle still shows ON while the app reports "Not Granted". Sign with a stable certificate so grants survive rebuilds:
+
+1. **One-time**: open Keychain Access → Certificate Assistant → **Create Certificate…**
+   - Name: e.g. `Kanso Dictate Dev Signing`
+   - Identity Type: *Self-Signed Root*, Certificate Type: *Code Signing*
+2. **Build with the identity**:
+   ```bash
+   KANSO_CODESIGN_IDENTITY="Kanso Dictate Dev Signing" ./scripts/build-app.sh release
+   ```
+   A Developer ID certificate works identically if you have one. Set `KANSO_CODESIGN_KEYCHAIN` to an explicit keychain path when the identity does not live in your login keychain (CI, temp keychains).
+3. **Verify** the identity is stable (must show `certificate leaf`, not `cdhash`):
+   ```bash
+   codesign -d -r- "/Applications/Kanso Dictate.app"
+   # designated => identifier "com.amaldevice.KansoDictate" and certificate leaf = H"…"
+   ```
+
 ---
 
 ## How to Dictate
