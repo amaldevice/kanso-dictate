@@ -30,7 +30,13 @@ public final class EventTapManager: @unchecked Sendable {
     public var onKeyDown: (@Sendable () -> Void)?
     public var onKeyUp: (@Sendable () -> Void)?
 
-    public init() {}
+    /// Which physical Option key triggers Push-To-Talk. Single-side modes use the
+    /// device-dependent mask only, so the other side is fully ignored.
+    public var trigger: PTTTriggerKey = PTTTriggerKey.load()
+
+    public init(trigger: PTTTriggerKey? = nil) {
+        if let trigger { self.trigger = trigger }
+    }
 
     deinit {
         stop()
@@ -148,12 +154,9 @@ public final class EventTapManager: @unchecked Sendable {
         }
     }
 
-    /// Re-reads live modifier state; drops a stuck KeyDown when Option was released while tap was disabled.
+    /// Re-reads live modifier state; drops a stuck KeyDown when the trigger was released while tap was disabled.
     public func resyncModifierState() {
-        let flags = CGEventSource.flagsState(.combinedSessionState).rawValue
-        let optionDown = (flags & Constants.alternateMask) != 0
-            || (flags & Constants.leftOptionMask) != 0
-            || (flags & Constants.rightOptionMask) != 0
+        let optionDown = isTriggerDown(flags: CGEventSource.flagsState(.combinedSessionState).rawValue)
         lock.lock()
         let wasDown = isKeyPressed
         if wasDown, !optionDown {
@@ -198,28 +201,34 @@ public final class EventTapManager: @unchecked Sendable {
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let rawFlags = event.flags.rawValue
-        let leftDown = (rawFlags & Constants.leftOptionMask) != 0
-        let rightDown = (rawFlags & Constants.rightOptionMask) != 0
-        let alternateDown = (rawFlags & Constants.alternateMask) != 0
 
         let isLeftKey = (keyCode == Constants.leftOptionKeyCode)
         let isRightKey = (keyCode == Constants.rightOptionKeyCode)
-        let isDown: Bool
-        if isLeftKey {
-            isDown = leftDown || alternateDown
-        } else if isRightKey {
-            isDown = rightDown || alternateDown
-        } else {
-            // Another modifier changed; only act if the Option state itself flipped
-            // (clears a stuck KeyDown when Option was released while tap was off).
-            isDown = alternateDown || leftDown || rightDown
+        let isTriggerKey: Bool
+        switch trigger {
+        case .rightOption:
+            isTriggerKey = isRightKey
+        case .leftOption:
+            isTriggerKey = isLeftKey
+        case .eitherOption:
+            isTriggerKey = isLeftKey || isRightKey
+        }
+        guard isTriggerKey else {
+            // Another key changed (incl. the non-trigger Option side): only clear
+            // a stuck KeyDown if the trigger itself is physically up.
+            let triggerDown = isTriggerDown(flags: rawFlags)
             lock.lock()
             let current = isKeyPressed
+            if current, !triggerDown { isKeyPressed = false }
             lock.unlock()
-            if isDown == current {
-                return Unmanaged.passUnretained(event)
+            if current, !triggerDown {
+                NSLog("KansoDictate: trigger released while tap was off (keyCode: %lld)", keyCode)
+                onKeyUp?()
             }
+            return Unmanaged.passUnretained(event)
         }
+
+        let isDown = isTriggerDown(flags: rawFlags)
 
         lock.lock()
         let previousState = isKeyPressed
@@ -227,13 +236,29 @@ public final class EventTapManager: @unchecked Sendable {
         lock.unlock()
 
         if isDown && !previousState {
-            NSLog("KansoDictate: Option KeyDown detected (keyCode: %lld)", keyCode)
+            NSLog("KansoDictate: PTT KeyDown detected (%@, keyCode: %lld)", trigger.rawValue, keyCode)
             onKeyDown?()
         } else if !isDown && previousState {
-            NSLog("KansoDictate: Option KeyUp detected (keyCode: %lld)", keyCode)
+            NSLog("KansoDictate: PTT KeyUp detected (%@, keyCode: %lld)", trigger.rawValue, keyCode)
             onKeyUp?()
         }
 
         return Unmanaged.passUnretained(event)
+    }
+
+    /// Physical state of the configured trigger. Single-side modes read ONLY the
+    /// device mask (0x40 right / 0x20 left) so the opposite Option never triggers.
+    /// Either-mode accepts either device mask (plus maskAlternate as fallback).
+    private func isTriggerDown(flags: UInt64) -> Bool {
+        let leftDown = (flags & Constants.leftOptionMask) != 0
+        let rightDown = (flags & Constants.rightOptionMask) != 0
+        switch trigger {
+        case .rightOption:
+            return rightDown
+        case .leftOption:
+            return leftDown
+        case .eitherOption:
+            return leftDown || rightDown || (flags & Constants.alternateMask) != 0
+        }
     }
 }

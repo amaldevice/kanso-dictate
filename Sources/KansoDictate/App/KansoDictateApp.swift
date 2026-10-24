@@ -7,6 +7,7 @@ public final class WindowManager: ObservableObject {
     public var historyWindow: NSWindow?
     public var settingsWindow: NSWindow?
     public weak var coordinator: DictationCoordinator?
+    public weak var hotkeyService: HotkeyService?
 
     public init(coordinator: DictationCoordinator? = nil) {
         self.coordinator = coordinator
@@ -49,7 +50,9 @@ public final class WindowManager: ObservableObject {
         )
         window.minSize = NSSize(width: 460, height: 420)
         window.title = "Kanso Dictate - Settings"
-        window.contentView = NSHostingView(rootView: SettingsView(coordinator: activeCoordinator))
+        window.contentView = NSHostingView(rootView: SettingsView(coordinator: activeCoordinator, onHotkeyChanged: { [weak self] trigger in
+            self?.hotkeyService?.setTrigger(trigger)
+        }))
         window.isReleasedWhenClosed = false
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -61,6 +64,7 @@ public final class WindowManager: ObservableObject {
 public final class HotkeyService: ObservableObject {
     public let manager = EventTapManager()
     @Published public private(set) var isTapRunning = false
+    @Published public private(set) var trigger: PTTTriggerKey = PTTTriggerKey.load()
     private weak var coordinator: DictationCoordinator?
 
     public init() {}
@@ -81,6 +85,7 @@ public final class HotkeyService: ObservableObject {
 
     @discardableResult
     public func start() -> Bool {
+        manager.trigger = trigger
         manager.resyncModifierState()
         isTapRunning = manager.start()
         return isTapRunning
@@ -96,6 +101,17 @@ public final class HotkeyService: ObservableObject {
 
     public func resync() {
         manager.resyncModifierState()
+    }
+
+    /// Applies a new trigger (from Settings) and restarts the tap so the change takes effect immediately.
+    public func setTrigger(_ newTrigger: PTTTriggerKey) {
+        trigger = newTrigger
+        newTrigger.save()
+        manager.trigger = newTrigger
+        manager.resyncModifierState()
+        if manager.isRunning {
+            restart()
+        }
     }
 }
 
@@ -138,6 +154,7 @@ public struct KansoDictateApp: App {
         let hotkeyServiceInstance = HotkeyService()
         hotkeyServiceInstance.attach(coordinator: coordinatorInstance)
         _hotkeyService = StateObject(wrappedValue: hotkeyServiceInstance)
+        windowManagerInstance.hotkeyService = hotkeyServiceInstance
         hotkeyServiceInstance.start()
 
         // Re-check permissions + tap whenever the app becomes active again
@@ -188,7 +205,7 @@ public struct KansoDictateApp: App {
     private var statusMessage: String {
         switch coordinator.state {
         case .idle:
-            return "Ready: Hold Right Option"
+            return "Ready: \(hotkeyService.trigger.shortHint)"
         case .recording:
             return "Recording audio..."
         case .transcribing:
@@ -212,12 +229,12 @@ public struct KansoDictateApp: App {
                 .foregroundColor(.secondary)
             if !hotkeyStatus.isActive {
                 Text(hotkeyStatus.isInputMonitoringGranted
-                     ? "⚠️ Option hotkey OFF — grant Accessibility in Settings"
-                     : "⚠️ Option hotkey OFF — grant Input Monitoring in Settings")
+                     ? "⚠️ \(hotkeyService.trigger.displayName) hotkey OFF — grant Accessibility in Settings"
+                     : "⚠️ \(hotkeyService.trigger.displayName) hotkey OFF — grant Input Monitoring in Settings")
                     .font(.caption)
                     .foregroundColor(.orange)
             } else if !hotkeyService.isTapRunning {
-                Text("⚠️ Option hotkey tap not running — use Restart Hotkey below")
+                Text("⚠️ \(hotkeyService.trigger.displayName) hotkey tap not running — use Restart Hotkey below")
                     .font(.caption)
                     .foregroundColor(.orange)
             }
@@ -228,7 +245,7 @@ public struct KansoDictateApp: App {
                     coordinator.stopDictation(forceCommit: true)
                 }
             } else {
-                Button("Start Dictation (or Hold ⌥)") {
+                Button("Start Dictation (or \(hotkeyService.trigger.shortHint))") {
                     hotkeyService.resync()
                     coordinator.startDictation()
                 }

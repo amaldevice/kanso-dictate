@@ -28,9 +28,12 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var isAccessibilityGranted: Bool
     @Published public var isMicrophoneGranted: Bool
     @Published public var isInputMonitoringGranted: Bool
+    @Published public var pttTrigger: PTTTriggerKey
     public var onSettingsChanged: (@MainActor () -> Void)?
+    public var onHotkeyChanged: (@MainActor (PTTTriggerKey) -> Void)?
     public init(onSettingsChanged: (@MainActor () -> Void)? = nil) {
         self.onSettingsChanged = onSettingsChanged
+        self.pttTrigger = PTTTriggerKey.load()
         let rawMode = UserDefaults.standard.string(forKey: "stt_provider_mode") ?? STTProviderMode.remote.rawValue
         self.providerMode = STTProviderMode(rawValue: rawMode) ?? .remote
         self.baseURL = UserDefaults.standard.string(forKey: "stt_base_url") ?? "https://api.groq.com/openai/v1"
@@ -78,6 +81,7 @@ public final class SettingsViewModel: ObservableObject {
         UserDefaults.standard.set(revaiModel, forKey: "revai_model")
         UserDefaults.standard.set(elevenlabsApiKey, forKey: "elevenlabs_api_key")
         UserDefaults.standard.set(elevenlabsModel, forKey: "elevenlabs_model")
+        pttTrigger.save()
         onSettingsChanged?()
     }
 
@@ -88,9 +92,45 @@ public final class SettingsViewModel: ObservableObject {
     }
 
     public func refreshPermissions() {
-        isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
-        isMicrophoneGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-        isInputMonitoringGranted = EventTapManager.isInputMonitoringAllowed()
+        // Assign only on change: with 1s polling below, unconditional assigns
+        // would republish (and re-render the form) every tick.
+        let accessibility = EventTapManager.isAccessibilityTrusted(prompt: false)
+        let microphone = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        let inputMonitoring = EventTapManager.isInputMonitoringAllowed()
+        if isAccessibilityGranted != accessibility { isAccessibilityGranted = accessibility }
+        if isMicrophoneGranted != microphone { isMicrophoneGranted = microphone }
+        if isInputMonitoringGranted != inputMonitoring { isInputMonitoringGranted = inputMonitoring }
+    }
+
+    public var allPermissionsGranted: Bool {
+        isAccessibilityGranted && isInputMonitoringGranted && isMicrophoneGranted
+    }
+
+    private var permissionPollTimer: Timer?
+
+    /// The NSWindow hosting the Settings view, reported by HostingWindowFinder;
+    /// used to stop the poll exactly when that window closes.
+    public var hostingWindow: NSWindow?
+
+    /// macOS emits no notification when a TCC toggle flips in System Settings,
+    /// so poll while the Settings window is open and something is still missing.
+    /// Auto-stops once every permission is granted.
+    public func startPermissionPolling() {
+        guard !allPermissionsGranted, permissionPollTimer == nil else { return }
+        permissionPollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self else { return }
+                self.refreshPermissions()
+                if self.allPermissionsGranted {
+                    self.stopPermissionPolling()
+                }
+            }
+        }
+    }
+
+    public func stopPermissionPolling() {
+        permissionPollTimer?.invalidate()
+        permissionPollTimer = nil
     }
 
 
@@ -114,7 +154,8 @@ public struct SettingsView: View {
     public init(
         viewModel: SettingsViewModel? = nil,
         coordinator: DictationCoordinator? = nil,
-        onSettingsChanged: (@MainActor () -> Void)? = nil
+        onSettingsChanged: (@MainActor () -> Void)? = nil,
+        onHotkeyChanged: (@MainActor (PTTTriggerKey) -> Void)? = nil
     ) {
         let vm = viewModel ?? SettingsViewModel()
         if let coordinator = coordinator {
@@ -124,6 +165,9 @@ public struct SettingsView: View {
             }
         } else if let onSettingsChanged = onSettingsChanged {
             vm.onSettingsChanged = onSettingsChanged
+        }
+        if let onHotkeyChanged {
+            vm.onHotkeyChanged = onHotkeyChanged
         }
         self.viewModel = vm
     }
@@ -292,17 +336,17 @@ public struct SettingsView: View {
             }
 
             Section("Push-To-Talk Hotkey") {
-                HStack {
-                    Text("Trigger Key:")
-                    Spacer()
-                    Text("Right Option (⌥)")
-                        .bold()
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.secondary.opacity(0.15))
-                        .cornerRadius(6)
+                Picker("Trigger Key:", selection: $viewModel.pttTrigger) {
+                    ForEach(PTTTriggerKey.allCases, id: \.self) { trigger in
+                        Text(trigger.displayName).tag(trigger)
+                    }
                 }
-                Text("Hold the Right Option key to record, release to transcribe and paste.")
+                .pickerStyle(.menu)
+                .onChange(of: viewModel.pttTrigger) {
+                    viewModel.save()
+                    viewModel.onHotkeyChanged?(viewModel.pttTrigger)
+                }
+                Text("Hold the \(viewModel.pttTrigger.displayName) key to record, release to transcribe and paste.")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
@@ -383,6 +427,21 @@ public struct SettingsView: View {
                 Text(viewModel.isMicrophoneGranted ? "Granted — audio capture ready." : "Required for audio capture. macOS prompts once; if denied, enable in System Settings → Privacy → Microphone.")
                     .font(.caption)
                     .foregroundColor(.secondary)
+
+                if !viewModel.allPermissionsGranted {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Label("Already ON in System Settings but still Not Granted here?", systemImage: "arrow.triangle.2.circlepath")
+                            .font(.caption.bold())
+                            .foregroundColor(.orange)
+                        Text("The stored grant belongs to a previous build of the app. In System Settings → Privacy & Security, select Kanso Dictate in the permission list, click the − button to remove it, click + to re-add it, then turn the toggle ON. Toggling off and on is not enough.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.orange.opacity(0.08))
+                    .cornerRadius(6)
+                }
             }
         }
         .padding()
@@ -390,10 +449,45 @@ public struct SettingsView: View {
         .frame(minWidth: 480, minHeight: 460)
         .onAppear {
             viewModel.refreshPermissions()
+            viewModel.startPermissionPolling()
+        }
+        .onDisappear {
+            viewModel.stopPermissionPolling()
+        }
+        // The settings window is cached (isReleasedWhenClosed = false), so
+        // onDisappear may never fire; stop polling when OUR window closes.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { note in
+            if let closing = note.object as? NSWindow, closing === viewModel.hostingWindow {
+                viewModel.stopPermissionPolling()
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             // User may have flipped a TCC toggle in System Settings; re-check on return.
             viewModel.refreshPermissions()
         }
+        .background(HostingWindowFinder { viewModel.hostingWindow = $0 })
+    }
+}
+
+/// Reports the NSWindow hosting this view, so the permission poll can be
+/// stopped exactly when that window closes.
+private struct HostingWindowFinder: NSViewRepresentable {
+    final class FinderView: NSView {
+        var onWindowChanged: ((NSWindow?) -> Void)?
+        override func viewDidMoveToWindow() {
+            onWindowChanged?(window)
+        }
+    }
+
+    let onWindowChanged: (NSWindow?) -> Void
+
+    func makeNSView(context: Context) -> FinderView {
+        let view = FinderView()
+        view.onWindowChanged = onWindowChanged
+        return view
+    }
+
+    func updateNSView(_ view: FinderView, context: Context) {
+        view.onWindowChanged = onWindowChanged
     }
 }

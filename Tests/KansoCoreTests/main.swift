@@ -218,6 +218,20 @@ assert(EventTapManager.Constants.rightOptionMask == 0x40, "Right Option mask mus
 assert(EventTapManager.Constants.leftOptionMask == 0x20, "Left Option mask must be NX_DEVICELALTKEYMASK (0x20)")
 _ = EventTapManager.isAccessibilityTrusted(prompt: false)
 print("✔ EventTapManager constants and permission inspection verified")
+
+// Test 13b: PTTTriggerKey defaults & persistence
+assert(PTTTriggerKey.default == .rightOption, "Default trigger must be Right Option only")
+let triggerDefaults = UserDefaults(suiteName: "KansoDictateTriggerTests")!
+triggerDefaults.removeObject(forKey: PTTTriggerKey.defaultsKey)
+assert(PTTTriggerKey.load(defaults: triggerDefaults) == .rightOption, "Missing key must load Right Option default")
+PTTTriggerKey.leftOption.save(defaults: triggerDefaults)
+assert(PTTTriggerKey.load(defaults: triggerDefaults) == .leftOption, "Saved Left Option must round-trip")
+triggerDefaults.set("bogus", forKey: PTTTriggerKey.defaultsKey)
+assert(PTTTriggerKey.load(defaults: triggerDefaults) == .rightOption, "Unknown raw value must fall back to Right Option")
+triggerDefaults.removeObject(forKey: PTTTriggerKey.defaultsKey)
+let rightOnlyTap = EventTapManager(trigger: .rightOption)
+assert(rightOnlyTap.trigger == .rightOption, "EventTapManager must honor injected trigger")
+print("✔ PTTTriggerKey defaults and persistence verified")
 // Test 14: WhisperKitConfig Defaults & Initialization
 let defaultWKConfig = WhisperKitConfig()
 assert(defaultWKConfig.modelFolder == nil, "Default modelFolder should be nil")

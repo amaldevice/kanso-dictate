@@ -114,6 +114,24 @@ cd kanso-dictate
 open "/Applications/Kanso Dictate.app"
 ```
 
+### Stable Signing (recommended)
+
+macOS ties privacy grants (Accessibility, Input Monitoring, Microphone) to the app's **code-signing identity**. With ad-hoc signing (the default), every rebuild produces a new identity, so macOS silently revokes all three permissions after each reinstall — the System Settings toggle still shows ON while the app reports "Not Granted". Sign with a stable certificate so grants survive rebuilds:
+
+1. **One-time**: open Keychain Access → Certificate Assistant → **Create Certificate…**
+   - Name: e.g. `Kanso Dictate Dev Signing`
+   - Identity Type: *Self-Signed Root*, Certificate Type: *Code Signing*
+2. **Build with the identity**:
+   ```bash
+   KANSO_CODESIGN_IDENTITY="Kanso Dictate Dev Signing" ./scripts/build-app.sh release
+   ```
+   A Developer ID certificate works identically if you have one. Set `KANSO_CODESIGN_KEYCHAIN` to an explicit keychain path when the identity does not live in your login keychain (CI, temp keychains).
+3. **Verify** the identity is stable (must show `certificate leaf`, not `cdhash`):
+   ```bash
+   codesign -d -r- "/Applications/Kanso Dictate.app"
+   # designated => identifier "com.amaldevice.KansoDictate" and certificate leaf = H"…"
+   ```
+
 ---
 
 ## How to Dictate
@@ -123,6 +141,33 @@ open "/Applications/Kanso Dictate.app"
 3. **Speak naturally**.
 4. **Release the `Right Option` key**. You will hear a *Pop* sound. The transcribed text will instantly type into your active text field.
 5. Your previous clipboard contents remain completely safe and untouched.
+
+---
+
+## Troubleshooting: "Not Granted" but System Settings Shows ON
+
+**Symptom:** Accessibility, Input Monitoring, or Microphone shows *Not Granted* in Kanso Dictate's Settings even though the app's toggle is ON in System Settings → Privacy & Security. The in-app Permissions section surfaces this case with a recovery hint.
+
+**Cause:** macOS TCC ties each privacy grant to the app's **code-signing identity**. Every build of an ad-hoc-signed app gets a new identity, so after installing a newer build the stored grant no longer matches — System Settings keeps displaying the old entry with the toggle ON, while the app (correctly) reports it is not authorized.
+
+**Fix — remove and re-add the entry** (toggling off and on is *not* enough):
+
+1. System Settings → Privacy & Security → the affected permission (Accessibility / Input Monitoring / Microphone).
+2. Select **Kanso Dictate** in the list, click **−** to remove it.
+3. Click **+**, re-add Kanso Dictate, and enable the toggle.
+4. Back in the app, the status flips to Granted within a second while its Settings window is open; the hotkey tap starts automatically (or use **Restart Hotkey Tap** in the menu bar).
+
+Or reset via the command line, then grant again when prompted:
+
+```bash
+tccutil reset Accessibility com.amaldevice.KansoDictate
+tccutil reset ListenEvent com.amaldevice.KansoDictate
+tccutil reset Microphone com.amaldevice.KansoDictate
+```
+
+**Prevention:** build releases with a stable signing identity (see [Stable Signing](#stable-signing-recommended)) — grants then survive every rebuild and upgrade.
+
+> **Note for contributors:** running the raw binary via `swift run KansoDictate …` creates a *second* TCC identity (the unpackaged executable) separate from the installed `.app`. A grant given to one does not apply to the other — they appear as separate entries in System Settings.
 
 ---
 
