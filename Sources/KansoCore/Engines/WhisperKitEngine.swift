@@ -117,24 +117,76 @@ public enum AudioDataParser {
     }
 }
 
-/// Background actor strictly isolating WhisperKit and Core ML inference off the MainActor.
-public actor WhisperTranscriptionActor {
-    private var whisperKit: WhisperKit?
-    private var isInitializing: Bool = false
+/// Minimal runtime seam representing a loaded WhisperKit instance for transcription and unloading.
+public protocol WhisperRuntime: Sendable {
+    func transcribe(
+        audioSamples: [Float],
+        language: String?,
+        prompt: String?
+    ) async throws -> String
 
-    public init() {}
+    func unloadModels() async
+}
 
-    /// True if WhisperKit is loaded and ready for transcription.
-    public var isReady: Bool {
-        whisperKit != nil
+private final class WhisperKitRuntime: WhisperRuntime, @unchecked Sendable {
+    private let kit: WhisperKit
+
+    init(kit: WhisperKit) {
+        self.kit = kit
     }
 
-    /// Initializes WhisperKit with specified configuration off the MainActor.
-    public func initialize(config: WhisperKitConfig) async throws {
-        guard whisperKit == nil, !isInitializing else { return }
-        isInitializing = true
-        defer { isInitializing = false }
+    func transcribe(
+        audioSamples: [Float],
+        language: String?,
+        prompt: String?
+    ) async throws -> String {
+        var decodeOptions = DecodingOptions()
+        decodeOptions.task = .transcribe
+        decodeOptions.temperature = 0.0
+        decodeOptions.skipSpecialTokens = true
+        decodeOptions.withoutTimestamps = true
 
+        if let language = language {
+            decodeOptions.language = language
+        }
+        if let prompt = prompt, let tokenizer = kit.tokenizer {
+            decodeOptions.promptTokens = tokenizer.encode(text: prompt)
+        }
+
+        let results = try await kit.transcribe(
+            audioArray: audioSamples,
+            decodeOptions: decodeOptions
+        )
+
+        return results
+            .map { $0.text }
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    func unloadModels() async {
+        await kit.unloadModels()
+    }
+}
+
+/// Background actor strictly isolating WhisperKit and Core ML inference off the MainActor.
+public actor WhisperTranscriptionActor {
+    public typealias RuntimeLoader = @Sendable (WhisperKitConfig) async throws -> any WhisperRuntime
+
+    private enum LoadingState {
+        case uninitialized
+        case initializing(id: UUID, task: Task<Void, Error>)
+        case ready(any WhisperRuntime)
+    }
+
+    private var state: LoadingState = .uninitialized
+    private let runtimeLoader: RuntimeLoader
+
+    public init(runtimeLoader: RuntimeLoader? = nil) {
+        self.runtimeLoader = runtimeLoader ?? Self.defaultRuntimeLoader
+    }
+
+    private static func defaultRuntimeLoader(config: WhisperKitConfig) async throws -> any WhisperRuntime {
         let computeOptions = ModelComputeOptions(
             melCompute: .cpuAndGPU,
             audioEncoderCompute: .cpuAndNeuralEngine,
@@ -161,7 +213,46 @@ public actor WhisperTranscriptionActor {
             load: true,
             download: true
         )
-        self.whisperKit = kit
+        return WhisperKitRuntime(kit: kit)
+    }
+
+    /// True if WhisperKit is loaded and ready for transcription.
+    public var isReady: Bool {
+        if case .ready = state {
+            return true
+        }
+        return false
+    }
+
+    /// Initializes WhisperKit with specified configuration off the MainActor,
+    /// coalescing concurrent callers onto any in-flight initialization task.
+    public func initialize(config: WhisperKitConfig) async throws {
+        switch state {
+        case .ready:
+            return
+        case .initializing(_, let task):
+            try await task.value
+        case .uninitialized:
+            let loadID = UUID()
+            let loader = runtimeLoader
+            let task = Task<Void, Error> {
+                do {
+                    let runtime = try await loader(config)
+                    guard case .initializing(let currentID, _) = self.state, currentID == loadID else {
+                        await runtime.unloadModels()
+                        throw CancellationError()
+                    }
+                    self.state = .ready(runtime)
+                } catch {
+                    if case .initializing(let currentID, _) = self.state, currentID == loadID {
+                        self.state = .uninitialized
+                    }
+                    throw error
+                }
+            }
+            state = .initializing(id: loadID, task: task)
+            try await task.value
+        }
     }
 
     /// Convenience initialization accepting config with labeled parameter `with`.
@@ -178,48 +269,46 @@ public actor WhisperTranscriptionActor {
     }
 
     /// Transcribes an array of 16kHz mono Float samples off the main thread.
+    /// Awaits any in-flight initialization before transcribing.
     public func transcribe(
         audioSamples: [Float],
         language: String? = nil,
         prompt: String? = nil
     ) async throws -> String {
-        guard let whisperKit = self.whisperKit else {
+        let runtime: any WhisperRuntime
+        switch state {
+        case .uninitialized:
             throw WhisperTranscriberError.notInitialized
+        case .initializing(_, let task):
+            try await task.value
+            guard case .ready(let loadedRuntime) = state else {
+                throw WhisperTranscriberError.notInitialized
+            }
+            runtime = loadedRuntime
+        case .ready(let loadedRuntime):
+            runtime = loadedRuntime
         }
 
         guard !audioSamples.isEmpty else { return "" }
 
-        var decodeOptions = DecodingOptions()
-        decodeOptions.task = .transcribe
-        decodeOptions.temperature = 0.0
-        decodeOptions.skipSpecialTokens = true
-        decodeOptions.withoutTimestamps = true
-
-        if let language = language {
-            decodeOptions.language = language
-        }
-        if let prompt = prompt, let tokenizer = whisperKit.tokenizer {
-            decodeOptions.promptTokens = tokenizer.encode(text: prompt)
-        }
-
-        let results = try await whisperKit.transcribe(
-            audioArray: audioSamples,
-            decodeOptions: decodeOptions
+        return try await runtime.transcribe(
+            audioSamples: audioSamples,
+            language: language,
+            prompt: prompt
         )
-
-        let fullText = results
-            .map { $0.text }
-            .joined(separator: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        return fullText
     }
 
     /// Unloads models to release Apple Neural Engine / GPU / unified memory resources.
     public func unload() async {
-        if let whisperKit = self.whisperKit {
-            await whisperKit.unloadModels()
-            self.whisperKit = nil
+        switch state {
+        case .uninitialized:
+            return
+        case .initializing(_, let task):
+            state = .uninitialized
+            task.cancel()
+        case .ready(let runtime):
+            state = .uninitialized
+            await runtime.unloadModels()
         }
     }
 }

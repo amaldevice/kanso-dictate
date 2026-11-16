@@ -2,6 +2,183 @@ import Foundation
 import CoreGraphics
 import ApplicationServices
 
+/// Explicit lifecycle state of the global CGEventTap and its permission-retry observer.
+public enum EventTapLifecycleState: String, Sendable, Equatable {
+    case stopped
+    case waitingForPermission
+    case starting
+    case running
+}
+
+/// Explicit physical key-press state for the configured Push-To-Talk trigger.
+public enum PTTKeyPressState: String, Sendable, Equatable {
+    case released
+    case pressed
+}
+
+/// Abstraction over a created event tap and its run-loop lifecycle.
+public protocol EventTapSession: AnyObject, Sendable {
+    /// Attaches the tap source to the current thread's run loop and enables the tap.
+    /// Returns a closure that detaches and stops that run loop when invoked.
+    func attachToCurrentRunLoop() -> @Sendable () -> Void
+    /// Runs the tap's run loop until stopped.
+    func run()
+    /// Re-enables the tap after OS timeout/user-input disablement.
+    func reenable()
+    /// Disables and invalidates the tap during shutdown.
+    func disable()
+}
+
+private struct SendableBox<Value>: @unchecked Sendable {
+    let value: Value
+}
+
+private final class TapCallbackBox: @unchecked Sendable {
+    let onDisabled: @Sendable () -> Void
+    let onFlagsChanged: @Sendable (Int64, UInt64) -> Void
+
+    init(
+        onDisabled: @escaping @Sendable () -> Void,
+        onFlagsChanged: @escaping @Sendable (Int64, UInt64) -> Void
+    ) {
+        self.onDisabled = onDisabled
+        self.onFlagsChanged = onFlagsChanged
+    }
+}
+
+private final class LiveEventTapSession: EventTapSession, @unchecked Sendable {
+    private let machPort: CFMachPort
+    private let source: CFRunLoopSource
+    private let callbackBox: TapCallbackBox
+
+    init?(
+        onDisabled: @escaping @Sendable () -> Void,
+        onFlagsChanged: @escaping @Sendable (Int64, UInt64) -> Void
+    ) {
+        let box = TapCallbackBox(onDisabled: onDisabled, onFlagsChanged: onFlagsChanged)
+        let mask = (1 << CGEventType.flagsChanged.rawValue)
+        let refcon = Unmanaged.passUnretained(box).toOpaque()
+
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: CGEventMask(mask),
+            callback: { (_, type, event, refcon) -> Unmanaged<CGEvent>? in
+                guard let refcon else { return Unmanaged.passUnretained(event) }
+                let callbackBox = Unmanaged<TapCallbackBox>.fromOpaque(refcon).takeUnretainedValue()
+                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                    callbackBox.onDisabled()
+                    return Unmanaged.passUnretained(event)
+                }
+                if type == .flagsChanged {
+                    let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+                    let rawFlags = event.flags.rawValue
+                    callbackBox.onFlagsChanged(keyCode, rawFlags)
+                }
+                return Unmanaged.passUnretained(event)
+            },
+            userInfo: refcon
+        ) else {
+            return nil
+        }
+
+        guard let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else {
+            CFMachPortInvalidate(tap)
+            return nil
+        }
+
+        self.machPort = tap
+        self.source = source
+        self.callbackBox = box
+    }
+
+    func attachToCurrentRunLoop() -> @Sendable () -> Void {
+        let loopBox = SendableBox(value: CFRunLoopGetCurrent())
+        let sourceBox = SendableBox(value: source)
+        if let loop = loopBox.value {
+            CFRunLoopAddSource(loop, sourceBox.value, .commonModes)
+        }
+        CGEvent.tapEnable(tap: machPort, enable: true)
+        return {
+            if let loop = loopBox.value {
+                CFRunLoopRemoveSource(loop, sourceBox.value, .commonModes)
+                CFRunLoopStop(loop)
+            }
+        }
+    }
+
+    func run() {
+        CFRunLoopRun()
+    }
+
+    func reenable() {
+        CGEvent.tapEnable(tap: machPort, enable: true)
+    }
+
+    func disable() {
+        CGEvent.tapEnable(tap: machPort, enable: false)
+        CFMachPortInvalidate(machPort)
+    }
+}
+
+/// Injectable OS dependencies for `EventTapManager`.
+public struct EventTapEnvironment: Sendable {
+    public var isInputMonitoringAllowed: @Sendable () -> Bool
+    public var isAccessibilityTrusted: @Sendable () -> Bool
+    public var currentModifierFlags: @Sendable () -> UInt64
+    public var createTap: @Sendable (
+        @escaping @Sendable () -> Void,
+        @escaping @Sendable (Int64, UInt64) -> Void
+    ) -> (any EventTapSession)?
+    public var scheduleWorker: @Sendable (@escaping @Sendable () -> Void) -> Void
+    public var scheduleRetry: @Sendable (@escaping @Sendable () -> Void) -> (@Sendable () -> Void)
+
+    public init(
+        isInputMonitoringAllowed: (@Sendable () -> Bool)? = nil,
+        isAccessibilityTrusted: (@Sendable () -> Bool)? = nil,
+        currentModifierFlags: (@Sendable () -> UInt64)? = nil,
+        createTap: (@Sendable (
+            @escaping @Sendable () -> Void,
+            @escaping @Sendable (Int64, UInt64) -> Void
+        ) -> (any EventTapSession)?)? = nil,
+        scheduleWorker: (@Sendable (@escaping @Sendable () -> Void) -> Void)? = nil,
+        scheduleRetry: (@Sendable (@escaping @Sendable () -> Void) -> (@Sendable () -> Void))? = nil
+    ) {
+        self.isInputMonitoringAllowed = isInputMonitoringAllowed ?? {
+            CGPreflightListenEventAccess()
+        }
+        self.isAccessibilityTrusted = isAccessibilityTrusted ?? {
+            EventTapManager.isAccessibilityTrusted(prompt: false)
+        }
+        self.currentModifierFlags = currentModifierFlags ?? {
+            CGEventSource.flagsState(.combinedSessionState).rawValue
+        }
+        self.createTap = createTap ?? { onDisabled, onFlagsChanged in
+            LiveEventTapSession(onDisabled: onDisabled, onFlagsChanged: onFlagsChanged)
+        }
+        self.scheduleWorker = scheduleWorker ?? { work in
+            let worker = Thread {
+                work()
+            }
+            worker.name = "dev.kanso-dictate.eventtap"
+            worker.qualityOfService = .userInteractive
+            worker.start()
+        }
+        self.scheduleRetry = scheduleRetry ?? { tick in
+            let timer = DispatchSource.makeTimerSource(queue: .main)
+            timer.schedule(deadline: .now() + 1.5, repeating: 1.5)
+            timer.setEventHandler(handler: tick)
+            timer.resume()
+            return {
+                timer.cancel()
+            }
+        }
+    }
+
+    public static let live = EventTapEnvironment()
+}
+
 /// Manages global modifier hotkey detection for Push-To-Talk via CGEventTap.
 public final class EventTapManager: @unchecked Sendable {
     public enum Constants {
@@ -13,29 +190,95 @@ public final class EventTapManager: @unchecked Sendable {
         public static let rightOptionMask: UInt64 = 0x0000_0040 // NX_DEVICERALTKEYMASK
     }
 
-    private var eventTap: CFMachPort?
-    private var runLoopSource: CFRunLoopSource?
-    private var workerThread: Thread?
-    private var workerRunLoop: CFRunLoop?
-    private var retryTimer: Timer?
     private let lock = NSLock()
-    private var isKeyPressed = false
+    private let environment: EventTapEnvironment
+    private var _lifecycleState: EventTapLifecycleState = .stopped
+    private var _keyPressState: PTTKeyPressState = .released
+    private var _trigger: PTTTriggerKey = PTTTriggerKey.load()
+    private var generation: UInt64 = 0
+    private var activeSession: (any EventTapSession)?
+    private var stopRunLoop: (@Sendable () -> Void)?
+    private var cancelRetry: (@Sendable () -> Void)?
+    private var _onKeyDown: (@Sendable () -> Void)?
+    private var _onKeyUp: (@Sendable () -> Void)?
+    private var _onLifecycleStateChange: (@Sendable (EventTapLifecycleState) -> Void)?
 
-    public var isRunning: Bool {
+    public var lifecycleState: EventTapLifecycleState {
         lock.lock()
         defer { lock.unlock() }
-        return eventTap != nil
+        return _lifecycleState
     }
 
-    public var onKeyDown: (@Sendable () -> Void)?
-    public var onKeyUp: (@Sendable () -> Void)?
+    public var isRunning: Bool {
+        lifecycleState == .running
+    }
+
+    public var keyPressState: PTTKeyPressState {
+        lock.lock()
+        defer { lock.unlock() }
+        return _keyPressState
+    }
+
+    public var onKeyDown: (@Sendable () -> Void)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _onKeyDown
+        }
+        set {
+            lock.lock()
+            _onKeyDown = newValue
+            lock.unlock()
+        }
+    }
+
+    public var onKeyUp: (@Sendable () -> Void)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _onKeyUp
+        }
+        set {
+            lock.lock()
+            _onKeyUp = newValue
+            lock.unlock()
+        }
+    }
+
+    public var onLifecycleStateChange: (@Sendable (EventTapLifecycleState) -> Void)? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _onLifecycleStateChange
+        }
+        set {
+            lock.lock()
+            _onLifecycleStateChange = newValue
+            lock.unlock()
+        }
+    }
 
     /// Which physical Option key triggers Push-To-Talk. Single-side modes use the
     /// device-dependent mask only, so the other side is fully ignored.
-    public var trigger: PTTTriggerKey = PTTTriggerKey.load()
+    public var trigger: PTTTriggerKey {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _trigger
+        }
+        set {
+            lock.lock()
+            _trigger = newValue
+            lock.unlock()
+        }
+    }
 
-    public init(trigger: PTTTriggerKey? = nil) {
-        if let trigger { self.trigger = trigger }
+    public init(
+        trigger: PTTTriggerKey? = nil,
+        environment: EventTapEnvironment = .live
+    ) {
+        self.environment = environment
+        if let trigger { self._trigger = trigger }
     }
 
     deinit {
@@ -59,153 +302,74 @@ public final class EventTapManager: @unchecked Sendable {
     public static func requestInputMonitoring() -> Bool {
         CGRequestListenEventAccess()
     }
+
     /// Starts listening for Option modifier transitions.
-    /// If accessibility is not yet granted, starts a lightweight retry observer on the main run loop.
+    /// If permission is not yet granted, transitions to `.waitingForPermission` and schedules a retry observer.
     @discardableResult
     public func start() -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-
-        guard eventTap == nil else { return true }
-
-        guard Self.isInputMonitoringAllowed() else {
-            NSLog("KansoDictate: Input Monitoring permission not granted; waiting for approval.")
-            schedulePermissionRetry()
-            return false
-        }
-
-        let mask = (1 << CGEventType.flagsChanged.rawValue)
-        let observerPointer = Unmanaged.passUnretained(self).toOpaque()
-
-        // Use .cgSessionEventTap for GUI user-session interception
-        guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
-            place: .headInsertEventTap,
-            options: .listenOnly,
-            eventsOfInterest: CGEventMask(mask),
-            callback: { (proxy, type, event, refcon) -> Unmanaged<CGEvent>? in
-                guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
-                let manager = Unmanaged<EventTapManager>.fromOpaque(refcon).takeUnretainedValue()
-                return manager.handleEvent(proxy: proxy, type: type, event: event)
-            },
-            userInfo: observerPointer
-        ) else {
-            NSLog("KansoDictate: CGEvent.tapCreate returned nil; retrying permission check.")
-            schedulePermissionRetry()
-            return false
-        }
-
-        retryTimer?.invalidate()
-        retryTimer = nil
-
-        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        self.eventTap = tap
-        self.runLoopSource = source
-        self.workerRunLoop = nil
-
-        // Dedicated worker thread: keeps tap alive during menu tracking,
-        // window dragging, and SwiftUI/audio work on the main thread.
-        let worker = Thread { [weak self] in
-            guard let self else { return }
-            self.lock.lock()
-            guard let currentTap = self.eventTap, let currentSource = self.runLoopSource else {
-                self.lock.unlock()
-                return
-            }
-            self.workerRunLoop = CFRunLoopGetCurrent()
-            let loop = self.workerRunLoop
-            self.lock.unlock()
-
-            guard let loop else { return }
-            CFRunLoopAddSource(loop, currentSource, .commonModes)
-            CGEvent.tapEnable(tap: currentTap, enable: true)
-            CFRunLoopRun()
-        }
-        worker.name = "dev.kanso-dictate.eventtap"
-        worker.qualityOfService = .userInteractive
-        self.workerThread = worker
-        worker.start()
-
-        NSLog("KansoDictate: Global hotkey event tap established successfully.")
-        return true
+        startInternal(expectedWaitingGeneration: nil)
     }
 
-    /// Stops the active event tap and its worker thread.
+    /// Stops the active event tap, cancels any permission retry observer, and resets key state.
     public func stop() {
         lock.lock()
-        let tap = eventTap
-        let source = runLoopSource
-        let runLoop = workerRunLoop
-        retryTimer?.invalidate()
-        retryTimer = nil
-        eventTap = nil
-        runLoopSource = nil
-        workerRunLoop = nil
-        workerThread = nil
-        isKeyPressed = false
+        generation &+= 1
+        let cancel = cancelRetry
+        cancelRetry = nil
+        let session = activeSession
+        activeSession = nil
+        let stopLoop = stopRunLoop
+        stopRunLoop = nil
+        let wasPressed = (_keyPressState == .pressed)
+        _keyPressState = .released
+        let stateChanged = (_lifecycleState != .stopped)
+        _lifecycleState = .stopped
+        let observer = _onLifecycleStateChange
+        let keyUpCallback = wasPressed ? _onKeyUp : nil
         lock.unlock()
 
-        if let tap {
-            CGEvent.tapEnable(tap: tap, enable: false)
-            if let source, let runLoop {
-                CFRunLoopRemoveSource(runLoop, source, .commonModes)
-                CFRunLoopStop(runLoop)
-            }
+        cancel?()
+        session?.disable()
+        stopLoop?()
+        keyUpCallback?()
+        if stateChanged {
+            observer?(.stopped)
         }
     }
 
     /// Re-reads live modifier state; drops a stuck KeyDown when the trigger was released while tap was disabled.
     public func resyncModifierState() {
-        let optionDown = isTriggerDown(flags: CGEventSource.flagsState(.combinedSessionState).rawValue)
+        let optionDown = isTriggerDown(flags: environment.currentModifierFlags(), trigger: trigger)
         lock.lock()
-        let wasDown = isKeyPressed
+        let wasDown = (_keyPressState == .pressed)
         if wasDown, !optionDown {
-            isKeyPressed = false
+            _keyPressState = .released
         }
+        let keyUpCallback = (wasDown && !optionDown) ? _onKeyUp : nil
         lock.unlock()
-        if wasDown, !optionDown {
-            onKeyUp?()
-        }
+        keyUpCallback?()
     }
 
-    private func schedulePermissionRetry() {
-        guard retryTimer == nil else { return }
-        DispatchQueue.main.async { [weak self] in
-            guard let self = self else { return }
-            self.retryTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
-                guard let self = self else { return }
-                if Self.isInputMonitoringAllowed() && Self.isAccessibilityTrusted(prompt: false) {
-                    _ = self.start()
-                }
-            }
-        }
+    /// Re-enables the active tap if it was disabled by OS timeout or user input.
+    public func processTapDisabled() {
+        lock.lock()
+        let session = (_lifecycleState == .running) ? activeSession : nil
+        lock.unlock()
+        session?.reenable()
     }
 
-    private func handleEvent(
-        proxy: CGEventTapProxy,
-        type: CGEventType,
-        event: CGEvent
-    ) -> Unmanaged<CGEvent>? {
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            lock.lock()
-            let tap = eventTap
+    /// Processes a modifier flags-changed event and transitions `keyPressState` accordingly.
+    public func processFlagsChanged(keyCode: Int64, flags rawFlags: UInt64) {
+        lock.lock()
+        guard _lifecycleState == .running else {
             lock.unlock()
-            if let tap {
-                CGEvent.tapEnable(tap: tap, enable: true)
-            }
-            return Unmanaged.passUnretained(event)
+            return
         }
-        guard type == .flagsChanged else {
-            return Unmanaged.passUnretained(event)
-        }
-
-        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-        let rawFlags = event.flags.rawValue
-
+        let activeTrigger = _trigger
         let isLeftKey = (keyCode == Constants.leftOptionKeyCode)
         let isRightKey = (keyCode == Constants.rightOptionKeyCode)
         let isTriggerKey: Bool
-        switch trigger {
+        switch activeTrigger {
         case .rightOption:
             isTriggerKey = isRightKey
         case .leftOption:
@@ -213,43 +377,157 @@ public final class EventTapManager: @unchecked Sendable {
         case .eitherOption:
             isTriggerKey = isLeftKey || isRightKey
         }
-        guard isTriggerKey else {
+
+        let keyDownCallback: (@Sendable () -> Void)?
+        let keyUpCallback: (@Sendable () -> Void)?
+        var logClearedWhileOff = false
+        var logKeyDown = false
+        var logKeyUp = false
+
+        if !isTriggerKey {
             // Another key changed (incl. the non-trigger Option side): only clear
             // a stuck KeyDown if the trigger itself is physically up.
-            let triggerDown = isTriggerDown(flags: rawFlags)
-            lock.lock()
-            let current = isKeyPressed
-            if current, !triggerDown { isKeyPressed = false }
-            lock.unlock()
-            if current, !triggerDown {
-                NSLog("KansoDictate: trigger released while tap was off (keyCode: %lld)", keyCode)
-                onKeyUp?()
-            }
-            return Unmanaged.passUnretained(event)
+            let triggerDown = isTriggerDown(flags: rawFlags, trigger: activeTrigger)
+            let wasPressed = (_keyPressState == .pressed)
+            if wasPressed, !triggerDown { _keyPressState = .released }
+            keyDownCallback = nil
+            keyUpCallback = (wasPressed && !triggerDown) ? _onKeyUp : nil
+            logClearedWhileOff = (keyUpCallback != nil)
+        } else {
+            let isDown = isTriggerDown(flags: rawFlags, trigger: activeTrigger)
+            let nextState: PTTKeyPressState = isDown ? .pressed : .released
+            let previousState = _keyPressState
+            _keyPressState = nextState
+            keyDownCallback = (nextState == .pressed && previousState == .released) ? _onKeyDown : nil
+            keyUpCallback = (nextState == .released && previousState == .pressed) ? _onKeyUp : nil
+            logKeyDown = (keyDownCallback != nil)
+            logKeyUp = (keyUpCallback != nil)
         }
-
-        let isDown = isTriggerDown(flags: rawFlags)
-
-        lock.lock()
-        let previousState = isKeyPressed
-        isKeyPressed = isDown
         lock.unlock()
 
-        if isDown && !previousState {
-            NSLog("KansoDictate: PTT KeyDown detected (%@, keyCode: %lld)", trigger.rawValue, keyCode)
-            onKeyDown?()
-        } else if !isDown && previousState {
-            NSLog("KansoDictate: PTT KeyUp detected (%@, keyCode: %lld)", trigger.rawValue, keyCode)
-            onKeyUp?()
+        if logClearedWhileOff {
+            NSLog("KansoDictate: trigger released while tap was off (keyCode: %lld)", keyCode)
+        }
+        if let keyDownCallback {
+            if logKeyDown {
+                NSLog("KansoDictate: PTT KeyDown detected (%@, keyCode: %lld)", activeTrigger.rawValue, keyCode)
+            }
+            keyDownCallback()
+        } else if let keyUpCallback {
+            if logKeyUp {
+                NSLog("KansoDictate: PTT KeyUp detected (%@, keyCode: %lld)", activeTrigger.rawValue, keyCode)
+            }
+            keyUpCallback()
+        }
+    }
+
+    private func startInternal(expectedWaitingGeneration: UInt64?) -> Bool {
+        lock.lock()
+        if let expectedWaitingGeneration {
+            guard _lifecycleState == .waitingForPermission, generation == expectedWaitingGeneration else {
+                lock.unlock()
+                return false
+            }
+        } else if _lifecycleState == .running || _lifecycleState == .starting {
+            lock.unlock()
+            return true
         }
 
-        return Unmanaged.passUnretained(event)
+        guard environment.isInputMonitoringAllowed() else {
+            NSLog("KansoDictate: Input Monitoring permission not granted; waiting for approval.")
+            return transitionToWaitingForPermissionAndUnlock()
+        }
+
+        guard let session = environment.createTap(
+            { [weak self] in self?.processTapDisabled() },
+            { [weak self] keyCode, flags in self?.processFlagsChanged(keyCode: keyCode, flags: flags) }
+        ) else {
+            NSLog("KansoDictate: CGEvent.tapCreate returned nil; retrying permission check.")
+            return transitionToWaitingForPermissionAndUnlock()
+        }
+
+        let cancel = cancelRetry
+        cancelRetry = nil
+        generation &+= 1
+        let workerGeneration = generation
+        activeSession = session
+        stopRunLoop = nil
+        let changed = (_lifecycleState != .starting)
+        _lifecycleState = .starting
+        let observer = _onLifecycleStateChange
+        lock.unlock()
+
+        cancel?()
+        if changed {
+            observer?(.starting)
+        }
+
+        environment.scheduleWorker { [weak self] in
+            self?.runWorker(session: session, generation: workerGeneration)
+        }
+
+        NSLog("KansoDictate: Global hotkey event tap established successfully.")
+        return true
+    }
+
+    /// Transitions to `.waitingForPermission`, unlocks `lock`, notifies observer if changed, and returns `false`.
+    /// Must be called with `lock` held.
+    private func transitionToWaitingForPermissionAndUnlock() -> Bool {
+        let changed = (_lifecycleState != .waitingForPermission)
+        _lifecycleState = .waitingForPermission
+        if cancelRetry == nil {
+            let waitingGeneration = generation
+            cancelRetry = environment.scheduleRetry { [weak self] in
+                self?.retryPermissionCheck(expectedGeneration: waitingGeneration)
+            }
+        }
+        let observer = _onLifecycleStateChange
+        lock.unlock()
+        if changed {
+            observer?(.waitingForPermission)
+        }
+        return false
+    }
+
+    private func retryPermissionCheck(expectedGeneration: UInt64) {
+        lock.lock()
+        let stillWaiting = (_lifecycleState == .waitingForPermission && generation == expectedGeneration)
+        lock.unlock()
+        guard stillWaiting else { return }
+
+        guard environment.isInputMonitoringAllowed() && environment.isAccessibilityTrusted() else {
+            return
+        }
+        _ = startInternal(expectedWaitingGeneration: expectedGeneration)
+    }
+
+    private func runWorker(session: any EventTapSession, generation expectedGeneration: UInt64) {
+        lock.lock()
+        guard _lifecycleState == .starting,
+              generation == expectedGeneration,
+              activeSession === session else {
+            lock.unlock()
+            session.disable()
+            return
+        }
+
+        let stopLoop = session.attachToCurrentRunLoop()
+        stopRunLoop = stopLoop
+        let changed = (_lifecycleState != .running)
+        _lifecycleState = .running
+        let observer = _onLifecycleStateChange
+        lock.unlock()
+
+        if changed {
+            observer?(.running)
+        }
+        session.run()
     }
 
     /// Physical state of the configured trigger. Single-side modes read ONLY the
     /// device mask (0x40 right / 0x20 left) so the opposite Option never triggers.
     /// Either-mode accepts either device mask (plus maskAlternate as fallback).
-    private func isTriggerDown(flags: UInt64) -> Bool {
+    private func isTriggerDown(flags: UInt64, trigger: PTTTriggerKey) -> Bool {
         let leftDown = (flags & Constants.leftOptionMask) != 0
         let rightDown = (flags & Constants.rightOptionMask) != 0
         switch trigger {

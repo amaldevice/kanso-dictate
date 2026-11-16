@@ -106,38 +106,48 @@ public final class AssemblyAISTTEngine: SpeechToTextEngine, @unchecked Sendable 
     }
 
     public func transcribe(audioData: Data, language: String?, prompt: String?) async throws -> TranscriptionResult {
-        let startTime = CFAbsoluteTimeGetCurrent()
-        let (uploadData, uploadHTTP) = try await send(try buildUploadRequest(audioData: audioData))
-        guard (200...299).contains(uploadHTTP.statusCode) else {
-            throw mapHTTPError(statusCode: uploadHTTP.statusCode, serverMessage: parseErrorMessage(from: uploadData, statusCode: uploadHTTP.statusCode))
+        struct CompletedPayload: Sendable {
+            let text: String
+            let duration: Double?
         }
-        let audioURL = try parseUploadURL(from: uploadData)
-        let (createData, createHTTP) = try await send(try buildCreateRequest(audioURL: audioURL, language: language, prompt: prompt))
-        guard (200...299).contains(createHTTP.statusCode) else {
-            throw mapHTTPError(statusCode: createHTTP.statusCode, serverMessage: parseErrorMessage(from: createData, statusCode: createHTTP.statusCode))
-        }
-        let transcriptID = try parseTranscriptID(from: createData)
-        for _ in 0..<config.maxPollAttempts {
-            let (pollData, pollHTTP) = try await send(try buildPollRequest(transcriptID: transcriptID))
-            guard (200...299).contains(pollHTTP.statusCode) else {
-                throw mapHTTPError(statusCode: pollHTTP.statusCode, serverMessage: parseErrorMessage(from: pollData, statusCode: pollHTTP.statusCode))
-            }
-            if let done = try parsePollResult(from: pollData) {
-                return TranscriptionResult(text: done.text, durationSeconds: done.duration ?? (CFAbsoluteTimeGetCurrent() - startTime), engineIdentifier: identifier, timestamp: Date())
-            }
-            try? await Task.sleep(nanoseconds: UInt64(config.pollInterval * 1_000_000_000))
-        }
-        throw STTError.networkError("AssemblyAI transcription timed out after \(config.maxPollAttempts) polls.")
-    }
 
-    private func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        let data: Data
-        let response: URLResponse
-        do { (data, response) = try await session.data(for: request) } catch {
-            throw STTError.networkError(error.localizedDescription)
+        let startTime = CFAbsoluteTimeGetCurrent()
+        let send: @Sendable (URLRequest) async throws -> Data = { request in
+            try await BatchJobPoller.send(
+                request,
+                using: self.session,
+                parseErrorMessage: { self.parseErrorMessage(from: $0, statusCode: $1) },
+                mapHTTPError: { self.mapHTTPError(statusCode: $0, serverMessage: $1) }
+            )
         }
-        guard let http = response as? HTTPURLResponse else { throw STTError.networkError("Invalid non-HTTP response received.") }
-        return (data, http)
+        return try await BatchJobPoller.run(
+            pollInterval: config.pollInterval,
+            maxPollAttempts: config.maxPollAttempts,
+            submit: {
+                let uploadData = try await send(try self.buildUploadRequest(audioData: audioData))
+                let audioURL = try self.parseUploadURL(from: uploadData)
+                let createData = try await send(try self.buildCreateRequest(audioURL: audioURL, language: language, prompt: prompt))
+                return try self.parseTranscriptID(from: createData)
+            },
+            poll: { transcriptID -> BatchJobPollOutcome<CompletedPayload> in
+                let pollData = try await send(try self.buildPollRequest(transcriptID: transcriptID))
+                if let done = try self.parsePollResult(from: pollData) {
+                    return .ready(CompletedPayload(text: done.text, duration: done.duration))
+                }
+                return .pending
+            },
+            fetch: { _, payload in
+                TranscriptionResult(
+                    text: payload.text,
+                    durationSeconds: payload.duration ?? (CFAbsoluteTimeGetCurrent() - startTime),
+                    engineIdentifier: self.identifier,
+                    timestamp: Date()
+                )
+            },
+            timeoutError: { attempts in
+                STTError.networkError("AssemblyAI transcription timed out after \(attempts) polls.")
+            }
+        )
     }
 
     private func mapHTTPError(statusCode: Int, serverMessage: String) -> STTError {

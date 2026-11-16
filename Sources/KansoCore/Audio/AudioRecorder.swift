@@ -2,7 +2,7 @@ import Foundation
 import AVFoundation
 
 /// Errors that can occur during audio recording operations.
-public enum AudioRecorderError: Error, LocalizedError, Sendable {
+public enum AudioRecorderError: Error, LocalizedError, Sendable, Equatable {
     case invalidHardwareFormat
     case converterInitializationFailed
     case conversionFailed(String)
@@ -44,20 +44,84 @@ public struct AudioRecording: Sendable {
     }
 }
 
-/// Minimal, zero-disk-leak audio recorder using AVAudioEngine downsampled to 16kHz mono.
-public final class AudioRecorder: @unchecked Sendable {
-    private let audioEngine: AVAudioEngine
-    private let lock = NSLock()
-    private var accumulatedSamples: [Float] = []
-    private var _isRecording = false
-    private let targetSampleRate: Double = 16_000.0
+/// Explicit capture lifecycle states for `AudioRecorder`.
+public enum AudioRecorderState: Equatable, Sendable {
+    case idle
+    case starting
+    case recording
+    case stopping
+}
 
-    public var isRecording: Bool {
-        lock.withLock { _isRecording }
+/// Abstraction over `AVAudioEngine` input capture for deterministic testing.
+public protocol AudioCaptureEngine: AnyObject, Sendable {
+    func inputFormat() -> AVAudioFormat
+    func installTap(
+        bufferSize: AVAudioFrameCount,
+        format: AVAudioFormat,
+        handler: @escaping (AVAudioPCMBuffer) -> Void
+    )
+    func removeTap()
+    func prepare()
+    func start() throws
+    func stop()
+}
+
+private final class SystemAudioCaptureEngine: AudioCaptureEngine, @unchecked Sendable {
+    private let audioEngine = AVAudioEngine()
+
+    func inputFormat() -> AVAudioFormat {
+        audioEngine.inputNode.inputFormat(forBus: 0)
     }
 
-    public init() {
-        self.audioEngine = AVAudioEngine()
+    func installTap(
+        bufferSize: AVAudioFrameCount,
+        format: AVAudioFormat,
+        handler: @escaping (AVAudioPCMBuffer) -> Void
+    ) {
+        audioEngine.inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: format) { buffer, _ in
+            handler(buffer)
+        }
+    }
+
+    func removeTap() {
+        audioEngine.inputNode.removeTap(onBus: 0)
+    }
+
+    func prepare() {
+        audioEngine.prepare()
+    }
+
+    func start() throws {
+        try audioEngine.start()
+    }
+
+    func stop() {
+        audioEngine.stop()
+    }
+}
+
+/// Minimal, zero-disk-leak audio recorder using AVAudioEngine downsampled to 16kHz mono.
+public final class AudioRecorder: @unchecked Sendable {
+    private let engine: any AudioCaptureEngine
+    private let lock = NSLock()
+    private var accumulatedSamples: [Float] = []
+    private var _state: AudioRecorderState = .idle
+    private let targetSampleRate: Double = 16_000.0
+
+    public var state: AudioRecorderState {
+        lock.withLock { _state }
+    }
+
+    public var isRecording: Bool {
+        lock.withLock { _state == .recording }
+    }
+
+    public convenience init() {
+        self.init(engine: SystemAudioCaptureEngine())
+    }
+
+    public init(engine: any AudioCaptureEngine) {
+        self.engine = engine
     }
 
     deinit {
@@ -67,15 +131,29 @@ public final class AudioRecorder: @unchecked Sendable {
     /// Starts recording audio from the default input device downsampled to 16kHz mono.
     public func startRecording() throws {
         lock.lock()
-        guard !_isRecording else {
+        guard _state == .idle else {
             lock.unlock()
             throw AudioRecorderError.alreadyRecording
         }
+        _state = .starting
         accumulatedSamples.removeAll(keepingCapacity: true)
         lock.unlock()
 
-        let inputNode = audioEngine.inputNode
-        let hardwareFormat = inputNode.inputFormat(forBus: 0)
+        var tapInstalled = false
+        var didTransitionToRecording = false
+        defer {
+            if !didTransitionToRecording {
+                if tapInstalled {
+                    engine.removeTap()
+                }
+                lock.withLock {
+                    _state = .idle
+                    accumulatedSamples.removeAll(keepingCapacity: false)
+                }
+            }
+        }
+
+        let hardwareFormat = engine.inputFormat()
 
         guard hardwareFormat.sampleRate > 0 else {
             throw AudioRecorderError.invalidHardwareFormat
@@ -94,9 +172,9 @@ public final class AudioRecorder: @unchecked Sendable {
             throw AudioRecorderError.converterInitializationFailed
         }
 
-        inputNode.removeTap(onBus: 0)
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: hardwareFormat) { [weak self] buffer, _ in
+        engine.installTap(bufferSize: 1024, format: hardwareFormat) { [weak self] buffer in
             guard let self else { return }
+            guard self.lock.withLock({ self._state == .recording }) else { return }
 
             let ratio = self.targetSampleRate / hardwareFormat.sampleRate
             let capacity = AVAudioFrameCount(Double(buffer.frameLength) * ratio) + 128
@@ -120,19 +198,21 @@ public final class AudioRecorder: @unchecked Sendable {
                 let frameCount = Int(convertedBuffer.frameLength)
                 let pointer = UnsafeBufferPointer(start: channelData, count: frameCount)
                 self.lock.withLock {
+                    guard self._state == .recording else { return }
                     self.accumulatedSamples.append(contentsOf: pointer)
                 }
             }
         }
+        tapInstalled = true
 
-        audioEngine.prepare()
+        engine.prepare()
         do {
-            try audioEngine.start()
+            try engine.start()
             lock.withLock {
-                _isRecording = true
+                _state = .recording
             }
+            didTransitionToRecording = true
         } catch {
-            inputNode.removeTap(onBus: 0)
             throw AudioRecorderError.engineFailedToStart(error.localizedDescription)
         }
     }
@@ -140,17 +220,16 @@ public final class AudioRecorder: @unchecked Sendable {
     /// Stops recording and returns the collected in-memory audio packaged as WAV and raw floats.
     public func stopRecording() throws -> AudioRecording {
         lock.lock()
-        guard _isRecording else {
+        guard _state == .recording else {
             lock.unlock()
             throw AudioRecorderError.notRecording
         }
-        _isRecording = false
+        _state = .stopping
         let capturedSamples = accumulatedSamples
         accumulatedSamples.removeAll(keepingCapacity: false)
         lock.unlock()
 
-        audioEngine.inputNode.removeTap(onBus: 0)
-        audioEngine.stop()
+        teardownCapture()
 
         let duration = Double(capturedSamples.count) / targetSampleRate
         let wavData = WAVWriter.createWAVData(from: capturedSamples, sampleRate: UInt32(targetSampleRate), channels: 1)
@@ -162,14 +241,22 @@ public final class AudioRecorder: @unchecked Sendable {
         )
     }
 
-
     private func stopSilently() {
-        lock.lock()
-        defer { lock.unlock() }
-        if _isRecording {
-            _isRecording = false
-            audioEngine.inputNode.removeTap(onBus: 0)
-            audioEngine.stop()
+        let shouldStop = lock.withLock { () -> Bool in
+            guard _state == .recording else { return false }
+            _state = .stopping
+            return true
+        }
+        if shouldStop {
+            teardownCapture()
+        }
+    }
+
+    private func teardownCapture() {
+        engine.removeTap()
+        engine.stop()
+        lock.withLock {
+            _state = .idle
         }
     }
 }

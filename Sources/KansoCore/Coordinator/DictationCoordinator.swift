@@ -27,8 +27,8 @@ public final class DictationCoordinator: ObservableObject {
     public let injector: TextInjector
     public let historyStore: HistoryStore
     @Published public var activeEngine: any SpeechToTextEngine
-    private var recordingStartTime: Date?
-    @Published public private(set) var isLockedRecording: Bool = false
+    private var pipelineGeneration: UInt64 = 0
+    private var pipelineTask: Task<Void, Never>?
 
     public init(
         recorder: any AudioRecordingService = AudioRecorder(),
@@ -160,12 +160,8 @@ public final class DictationCoordinator: ObservableObject {
 
     /// Starts audio recording for dictation.
     public func startDictation() {
-        switch state {
-        case .idle, .error:
-            break
-        default:
-            return
-        }
+        guard state != .recording else { return }
+        invalidatePipeline()
 
         if recorder.isRecording {
             _ = try? recorder.stopRecording()
@@ -187,26 +183,32 @@ public final class DictationCoordinator: ObservableObject {
             let recording = try recorder.stopRecording()
             guard recording.durationSeconds >= 0.3 || forceCommit else {
                 // Micro-tap guard: abort without error, alert, or STT invocation
+                invalidatePipeline()
                 state = .idle
                 return
             }
 
             playFeedbackSound(named: "Pop")
             state = .transcribing
+            let generation = invalidatePipeline()
+            let engine = activeEngine
 
-            Task {
+            pipelineTask = Task { [weak self] in
+                guard let self else { return }
                 do {
-                    let result = try await activeEngine.transcribe(
+                    let result = try await engine.transcribe(
                         audioData: recording.wavData,
                         language: nil,
                         prompt: nil
                     )
+                    guard !Task.isCancelled, self.pipelineGeneration == generation else { return }
 
-                    lastTranscribedText = result.text
+                    self.lastTranscribedText = result.text
 
                     if !result.text.isEmpty {
-                        state = .inserting
-                        try await injector.inject(text: result.text)
+                        self.state = .inserting
+                        try await self.injector.inject(text: result.text)
+                        guard !Task.isCancelled, self.pipelineGeneration == generation else { return }
 
                         let record = HistoryRecord(
                             text: result.text,
@@ -214,17 +216,29 @@ public final class DictationCoordinator: ObservableObject {
                             engineIdentifier: result.engineIdentifier,
                             timestamp: Date()
                         )
-                        historyStore.addRecord(record)
+                        self.historyStore.addRecord(record)
                     }
 
-                    state = .idle
+                    self.pipelineTask = nil
+                    self.state = .idle
                 } catch {
-                    state = .error("Transcription/Injection failed: \(error.localizedDescription)")
+                    guard !Task.isCancelled, self.pipelineGeneration == generation else { return }
+                    self.pipelineTask = nil
+                    self.state = .error("Transcription/Injection failed: \(error.localizedDescription)")
                 }
             }
         } catch {
+            invalidatePipeline()
             state = .error("Failed to stop recording: \(error.localizedDescription)")
         }
+    }
+
+    @discardableResult
+    private func invalidatePipeline() -> UInt64 {
+        pipelineGeneration &+= 1
+        pipelineTask?.cancel()
+        pipelineTask = nil
+        return pipelineGeneration
     }
 
     private func playFeedbackSound(named name: String) {

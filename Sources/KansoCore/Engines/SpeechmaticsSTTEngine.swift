@@ -114,36 +114,33 @@ public final class SpeechmaticsSTTEngine: SpeechToTextEngine, @unchecked Sendabl
 
     public func transcribe(audioData: Data, language: String?, prompt: String?) async throws -> TranscriptionResult {
         let startTime = CFAbsoluteTimeGetCurrent()
-        let (createData, createHTTP) = try await send(try buildCreateRequest(audioData: audioData, language: language, prompt: prompt))
-        guard (200...299).contains(createHTTP.statusCode) else {
-            throw mapHTTPError(statusCode: createHTTP.statusCode, serverMessage: parseErrorMessage(from: createData, statusCode: createHTTP.statusCode))
+        let send: @Sendable (URLRequest) async throws -> Data = { request in
+            try await BatchJobPoller.send(
+                request,
+                using: self.session,
+                parseErrorMessage: { self.parseErrorMessage(from: $0, statusCode: $1) },
+                mapHTTPError: { self.mapHTTPError(statusCode: $0, serverMessage: $1) }
+            )
         }
-        let jobID = try parseJobID(from: createData)
-        for _ in 0..<config.maxPollAttempts {
-            let (pollData, pollHTTP) = try await send(try buildPollRequest(jobID: jobID))
-            guard (200...299).contains(pollHTTP.statusCode) else {
-                throw mapHTTPError(statusCode: pollHTTP.statusCode, serverMessage: parseErrorMessage(from: pollData, statusCode: pollHTTP.statusCode))
+        return try await BatchJobPoller.run(
+            pollInterval: config.pollInterval,
+            maxPollAttempts: config.maxPollAttempts,
+            submit: {
+                let createData = try await send(try self.buildCreateRequest(audioData: audioData, language: language, prompt: prompt))
+                return try self.parseJobID(from: createData)
+            },
+            poll: { jobID -> BatchJobPollOutcome<Bool> in
+                let pollData = try await send(try self.buildPollRequest(jobID: jobID))
+                return try self.parseJobDone(from: pollData) ? .ready(true) : .pending
+            },
+            fetch: { jobID, _ in
+                let transcriptData = try await send(try self.buildTranscriptRequest(jobID: jobID))
+                return try self.parseTranscript(from: transcriptData, fallbackDuration: CFAbsoluteTimeGetCurrent() - startTime)
+            },
+            timeoutError: { attempts in
+                STTError.networkError("Speechmatics transcription timed out after \(attempts) polls.")
             }
-            if try parseJobDone(from: pollData) {
-                let (tData, tHTTP) = try await send(try buildTranscriptRequest(jobID: jobID))
-                guard (200...299).contains(tHTTP.statusCode) else {
-                    throw mapHTTPError(statusCode: tHTTP.statusCode, serverMessage: parseErrorMessage(from: tData, statusCode: tHTTP.statusCode))
-                }
-                return try parseTranscript(from: tData, fallbackDuration: CFAbsoluteTimeGetCurrent() - startTime)
-            }
-            try? await Task.sleep(nanoseconds: UInt64(config.pollInterval * 1_000_000_000))
-        }
-        throw STTError.networkError("Speechmatics transcription timed out after \(config.maxPollAttempts) polls.")
-    }
-
-    private func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        let data: Data
-        let response: URLResponse
-        do { (data, response) = try await session.data(for: request) } catch {
-            throw STTError.networkError(error.localizedDescription)
-        }
-        guard let http = response as? HTTPURLResponse else { throw STTError.networkError("Invalid non-HTTP response received.") }
-        return (data, http)
+        )
     }
 
     private func mapHTTPError(statusCode: Int, serverMessage: String) -> STTError {
