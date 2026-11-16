@@ -112,17 +112,25 @@ public final class AssemblyAISTTEngine: SpeechToTextEngine, @unchecked Sendable 
         }
 
         let startTime = CFAbsoluteTimeGetCurrent()
+        let send: @Sendable (URLRequest) async throws -> Data = { request in
+            try await BatchJobPoller.send(
+                request,
+                using: self.session,
+                parseErrorMessage: { self.parseErrorMessage(from: $0, statusCode: $1) },
+                mapHTTPError: { self.mapHTTPError(statusCode: $0, serverMessage: $1) }
+            )
+        }
         return try await BatchJobPoller.run(
             pollInterval: config.pollInterval,
             maxPollAttempts: config.maxPollAttempts,
             submit: {
-                let uploadData = try await self.send(try self.buildUploadRequest(audioData: audioData))
+                let uploadData = try await send(try self.buildUploadRequest(audioData: audioData))
                 let audioURL = try self.parseUploadURL(from: uploadData)
-                let createData = try await self.send(try self.buildCreateRequest(audioURL: audioURL, language: language, prompt: prompt))
+                let createData = try await send(try self.buildCreateRequest(audioURL: audioURL, language: language, prompt: prompt))
                 return try self.parseTranscriptID(from: createData)
             },
             poll: { transcriptID -> BatchJobPollOutcome<CompletedPayload> in
-                let pollData = try await self.send(try self.buildPollRequest(transcriptID: transcriptID))
+                let pollData = try await send(try self.buildPollRequest(transcriptID: transcriptID))
                 if let done = try self.parsePollResult(from: pollData) {
                     return .ready(CompletedPayload(text: done.text, duration: done.duration))
                 }
@@ -139,15 +147,6 @@ public final class AssemblyAISTTEngine: SpeechToTextEngine, @unchecked Sendable 
             timeoutError: { attempts in
                 STTError.networkError("AssemblyAI transcription timed out after \(attempts) polls.")
             }
-        )
-    }
-
-    private func send(_ request: URLRequest) async throws -> Data {
-        try await BatchJobPoller.send(
-            request,
-            using: session,
-            parseErrorMessage: { parseErrorMessage(from: $0, statusCode: $1) },
-            mapHTTPError: { mapHTTPError(statusCode: $0, serverMessage: $1) }
         )
     }
 

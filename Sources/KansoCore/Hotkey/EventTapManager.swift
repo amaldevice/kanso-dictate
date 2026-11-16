@@ -36,7 +36,6 @@ private struct SendableBox<Value>: @unchecked Sendable {
 private final class TapCallbackBox: @unchecked Sendable {
     let onDisabled: @Sendable () -> Void
     let onFlagsChanged: @Sendable (Int64, UInt64) -> Void
-    weak var session: LiveEventTapSession?
 
     init(
         onDisabled: @escaping @Sendable () -> Void,
@@ -92,7 +91,6 @@ private final class LiveEventTapSession: EventTapSession, @unchecked Sendable {
         self.machPort = tap
         self.source = source
         self.callbackBox = box
-        box.session = self
     }
 
     func attachToCurrentRunLoop() -> @Sendable () -> Void {
@@ -362,7 +360,12 @@ public final class EventTapManager: @unchecked Sendable {
 
     /// Processes a modifier flags-changed event and transitions `keyPressState` accordingly.
     public func processFlagsChanged(keyCode: Int64, flags rawFlags: UInt64) {
-        let activeTrigger = trigger
+        lock.lock()
+        guard _lifecycleState == .running else {
+            lock.unlock()
+            return
+        }
+        let activeTrigger = _trigger
         let isLeftKey = (keyCode == Constants.leftOptionKeyCode)
         let isRightKey = (keyCode == Constants.rightOptionKeyCode)
         let isTriggerKey: Bool
@@ -374,37 +377,46 @@ public final class EventTapManager: @unchecked Sendable {
         case .eitherOption:
             isTriggerKey = isLeftKey || isRightKey
         }
-        guard isTriggerKey else {
+
+        let keyDownCallback: (@Sendable () -> Void)?
+        let keyUpCallback: (@Sendable () -> Void)?
+        var logClearedWhileOff = false
+        var logKeyDown = false
+        var logKeyUp = false
+
+        if !isTriggerKey {
             // Another key changed (incl. the non-trigger Option side): only clear
             // a stuck KeyDown if the trigger itself is physically up.
             let triggerDown = isTriggerDown(flags: rawFlags, trigger: activeTrigger)
-            lock.lock()
             let wasPressed = (_keyPressState == .pressed)
             if wasPressed, !triggerDown { _keyPressState = .released }
-            let keyUpCallback = (wasPressed && !triggerDown) ? _onKeyUp : nil
-            lock.unlock()
-            if keyUpCallback != nil {
-                NSLog("KansoDictate: trigger released while tap was off (keyCode: %lld)", keyCode)
-            }
-            keyUpCallback?()
-            return
+            keyDownCallback = nil
+            keyUpCallback = (wasPressed && !triggerDown) ? _onKeyUp : nil
+            logClearedWhileOff = (keyUpCallback != nil)
+        } else {
+            let isDown = isTriggerDown(flags: rawFlags, trigger: activeTrigger)
+            let nextState: PTTKeyPressState = isDown ? .pressed : .released
+            let previousState = _keyPressState
+            _keyPressState = nextState
+            keyDownCallback = (nextState == .pressed && previousState == .released) ? _onKeyDown : nil
+            keyUpCallback = (nextState == .released && previousState == .pressed) ? _onKeyUp : nil
+            logKeyDown = (keyDownCallback != nil)
+            logKeyUp = (keyUpCallback != nil)
         }
-
-        let isDown = isTriggerDown(flags: rawFlags, trigger: activeTrigger)
-        let nextState: PTTKeyPressState = isDown ? .pressed : .released
-
-        lock.lock()
-        let previousState = _keyPressState
-        _keyPressState = nextState
-        let keyDownCallback = (nextState == .pressed && previousState == .released) ? _onKeyDown : nil
-        let keyUpCallback = (nextState == .released && previousState == .pressed) ? _onKeyUp : nil
         lock.unlock()
 
+        if logClearedWhileOff {
+            NSLog("KansoDictate: trigger released while tap was off (keyCode: %lld)", keyCode)
+        }
         if let keyDownCallback {
-            NSLog("KansoDictate: PTT KeyDown detected (%@, keyCode: %lld)", activeTrigger.rawValue, keyCode)
+            if logKeyDown {
+                NSLog("KansoDictate: PTT KeyDown detected (%@, keyCode: %lld)", activeTrigger.rawValue, keyCode)
+            }
             keyDownCallback()
         } else if let keyUpCallback {
-            NSLog("KansoDictate: PTT KeyUp detected (%@, keyCode: %lld)", activeTrigger.rawValue, keyCode)
+            if logKeyUp {
+                NSLog("KansoDictate: PTT KeyUp detected (%@, keyCode: %lld)", activeTrigger.rawValue, keyCode)
+            }
             keyUpCallback()
         }
     }
@@ -423,12 +435,7 @@ public final class EventTapManager: @unchecked Sendable {
 
         guard environment.isInputMonitoringAllowed() else {
             NSLog("KansoDictate: Input Monitoring permission not granted; waiting for approval.")
-            let (changed, observer) = enterWaitingForPermissionLocked()
-            lock.unlock()
-            if changed {
-                observer?(.waitingForPermission)
-            }
-            return false
+            return transitionToWaitingForPermissionAndUnlock()
         }
 
         guard let session = environment.createTap(
@@ -436,12 +443,7 @@ public final class EventTapManager: @unchecked Sendable {
             { [weak self] keyCode, flags in self?.processFlagsChanged(keyCode: keyCode, flags: flags) }
         ) else {
             NSLog("KansoDictate: CGEvent.tapCreate returned nil; retrying permission check.")
-            let (changed, observer) = enterWaitingForPermissionLocked()
-            lock.unlock()
-            if changed {
-                observer?(.waitingForPermission)
-            }
-            return false
+            return transitionToWaitingForPermissionAndUnlock()
         }
 
         let cancel = cancelRetry
@@ -468,7 +470,9 @@ public final class EventTapManager: @unchecked Sendable {
         return true
     }
 
-    private func enterWaitingForPermissionLocked() -> (Bool, (@Sendable (EventTapLifecycleState) -> Void)?) {
+    /// Transitions to `.waitingForPermission`, unlocks `lock`, notifies observer if changed, and returns `false`.
+    /// Must be called with `lock` held.
+    private func transitionToWaitingForPermissionAndUnlock() -> Bool {
         let changed = (_lifecycleState != .waitingForPermission)
         _lifecycleState = .waitingForPermission
         if cancelRetry == nil {
@@ -477,7 +481,12 @@ public final class EventTapManager: @unchecked Sendable {
                 self?.retryPermissionCheck(expectedGeneration: waitingGeneration)
             }
         }
-        return (changed, _onLifecycleStateChange)
+        let observer = _onLifecycleStateChange
+        lock.unlock()
+        if changed {
+            observer?(.waitingForPermission)
+        }
+        return false
     }
 
     private func retryPermissionCheck(expectedGeneration: UInt64) {

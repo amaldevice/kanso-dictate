@@ -110,8 +110,7 @@ public final class PermissionPollingCoordinator: ObservableObject {
     /// Notifies the coordinator that the Settings view appeared.
     public func handleViewAppear() {
         isWindowOpen = true
-        refreshPermissions()
-        startPolling()
+        refreshAndPollIfNeeded()
     }
 
     /// Notifies the coordinator that the Settings view disappeared.
@@ -166,19 +165,21 @@ public final class PermissionPollingCoordinator: ObservableObject {
 
     private func handleWindowDidBecomeKey() {
         isWindowOpen = true
-        refreshPermissions()
-        if !status.allGranted {
-            startPolling()
-        }
+        refreshAndPollIfNeeded()
     }
 
     private func handleAppDidBecomeActive() {
         if isWindowOpen {
-            refreshPermissions()
-            if !status.allGranted {
-                startPolling()
-            }
+            refreshAndPollIfNeeded()
         } else if state == .polling {
+            refreshPermissions()
+        }
+    }
+
+    private func refreshAndPollIfNeeded() {
+        if state == .idle {
+            startPolling()
+        } else {
             refreshPermissions()
         }
     }

@@ -114,33 +114,32 @@ public final class RevAISTTEngine: SpeechToTextEngine, @unchecked Sendable {
 
     public func transcribe(audioData: Data, language: String?, prompt: String?) async throws -> TranscriptionResult {
         let startTime = CFAbsoluteTimeGetCurrent()
+        let send: @Sendable (URLRequest) async throws -> Data = { request in
+            try await BatchJobPoller.send(
+                request,
+                using: self.session,
+                parseErrorMessage: { self.parseErrorMessage(from: $0, statusCode: $1) },
+                mapHTTPError: { self.mapHTTPError(statusCode: $0, serverMessage: $1) }
+            )
+        }
         return try await BatchJobPoller.run(
             pollInterval: config.pollInterval,
             maxPollAttempts: config.maxPollAttempts,
             submit: {
-                let submitData = try await self.send(try self.buildSubmitRequest(audioData: audioData, language: language, prompt: prompt))
+                let submitData = try await send(try self.buildSubmitRequest(audioData: audioData, language: language, prompt: prompt))
                 return try self.parseJobID(from: submitData)
             },
             poll: { jobID -> BatchJobPollOutcome<Bool> in
-                let pollData = try await self.send(try self.buildPollRequest(jobID: jobID))
+                let pollData = try await send(try self.buildPollRequest(jobID: jobID))
                 return try self.parseJobDone(from: pollData) ? .ready(true) : .pending
             },
             fetch: { jobID, _ in
-                let transcriptData = try await self.send(try self.buildTranscriptRequest(jobID: jobID))
+                let transcriptData = try await send(try self.buildTranscriptRequest(jobID: jobID))
                 return try self.parseTranscript(from: transcriptData, fallbackDuration: CFAbsoluteTimeGetCurrent() - startTime)
             },
             timeoutError: { attempts in
                 STTError.networkError("Rev.ai transcription timed out after \(attempts) polls.")
             }
-        )
-    }
-
-    private func send(_ request: URLRequest) async throws -> Data {
-        try await BatchJobPoller.send(
-            request,
-            using: session,
-            parseErrorMessage: { parseErrorMessage(from: $0, statusCode: $1) },
-            mapHTTPError: { mapHTTPError(statusCode: $0, serverMessage: $1) }
         )
     }
 

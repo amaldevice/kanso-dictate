@@ -5,19 +5,6 @@ private enum MockWhisperTestError: Error, Equatable {
     case loadFailed
 }
 
-private final class AtomicFlag: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value = false
-
-    func set(_ newValue: Bool) {
-        lock.withLock { value = newValue }
-    }
-
-    func get() -> Bool {
-        lock.withLock { value }
-    }
-}
-
 private final class MockWhisperRuntime: WhisperRuntime, @unchecked Sendable {
     private let lock = NSLock()
     private var _unloadCount = 0
@@ -167,16 +154,16 @@ private func testConcurrentInitializeAndTranscribeCoalescing() async throws {
     }
     await gate.waitUntilParked(count: 1)
 
-    let caller2Finished = AtomicFlag()
+    let caller2Finished = LockedBox(false)
     let caller2 = Task {
         try await actor.initialize(config: WhisperKitConfig())
-        caller2Finished.set(true)
+        caller2Finished.withLock { $0 = true }
     }
 
-    let caller3Finished = AtomicFlag()
+    let caller3Finished = LockedBox(false)
     let caller3 = Task { () -> String in
         let text = try await actor.transcribe(audioSamples: [0.1, 0.2])
-        caller3Finished.set(true)
+        caller3Finished.withLock { $0 = true }
         return text
     }
 
@@ -184,8 +171,8 @@ private func testConcurrentInitializeAndTranscribeCoalescing() async throws {
     let readyWhileInitializing = await actor.isReady
     let loadsWhileInitializing = await gate.currentLoadCount()
     assert(!readyWhileInitializing, "Actor must not report ready while initializing")
-    assert(!caller2Finished.get(), "Concurrent initialize() must wait for in-flight load")
-    assert(!caller3Finished.get(), "Concurrent transcribe() must wait for in-flight load")
+    assert(!caller2Finished.value, "Concurrent initialize() must wait for in-flight load")
+    assert(!caller3Finished.value, "Concurrent transcribe() must wait for in-flight load")
     assert(loadsWhileInitializing == 1, "Loader must be invoked only once")
 
     await gate.releaseNext(with: .success(runtime))
@@ -196,8 +183,8 @@ private func testConcurrentInitializeAndTranscribeCoalescing() async throws {
 
     let loadsAfterFinish = await gate.currentLoadCount()
     let readyAfterLoad = await actor.isReady
-    assert(caller2Finished.get(), "Concurrent initialize() must finish after load")
-    assert(caller3Finished.get(), "Concurrent transcribe() must finish after load")
+    assert(caller2Finished.value, "Concurrent initialize() must finish after load")
+    assert(caller3Finished.value, "Concurrent transcribe() must finish after load")
     assert(transcribed == "coalesced transcript", "Expected coalesced transcript, got \(transcribed)")
     assert(runtime.transcribeCount == 1, "Expected 1 transcription on shared runtime")
     assert(loadsAfterFinish == 1, "Loader must still have been invoked only once")

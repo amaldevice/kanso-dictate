@@ -2,29 +2,9 @@ import Foundation
 import Combine
 import KansoCore
 
-private final class AtomicBox<Value>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var _value: Value
-
-    init(_ value: Value) {
-        self._value = value
-    }
-
-    var value: Value {
-        lock.lock()
-        defer { lock.unlock() }
-        return _value
-    }
-
-    func mutate(_ body: (inout Value) -> Void) {
-        lock.lock()
-        defer { lock.unlock() }
-        body(&_value)
-    }
-}
-
 @MainActor
 func runEventTapStateMachineTests() async {
+    testFlagsChangedIgnoredWhenNotRunning()
     testKeyPressStateTransitions()
     testModifierResyncAndStopReset()
     testLifecycleAndPermissionRetry()
@@ -32,13 +12,102 @@ func runEventTapStateMachineTests() async {
     await testHotkeyServiceLiveStateSync()
 }
 
+private func makeRunningManager(
+    trigger: PTTTriggerKey = .rightOption,
+    currentModifierFlags: (@Sendable () -> UInt64)? = nil
+) -> EventTapManager {
+    let env = EventTapEnvironment(
+        isInputMonitoringAllowed: { true },
+        isAccessibilityTrusted: { true },
+        currentModifierFlags: currentModifierFlags,
+        createTap: { _, _ in MockTapSession() },
+        scheduleWorker: { work in work() },
+        scheduleRetry: { _ in {} }
+    )
+    let manager = EventTapManager(trigger: trigger, environment: env)
+    assert(manager.start(), "Test manager must start")
+    assert(manager.lifecycleState == .running, "Test manager must be .running")
+    return manager
+}
+
+private func testFlagsChangedIgnoredWhenNotRunning() {
+    let inputMonitoringGranted = LockedBox(false)
+    let pendingWorkers = LockedBox<[@Sendable () -> Void]>([])
+    let env = EventTapEnvironment(
+        isInputMonitoringAllowed: { inputMonitoringGranted.value },
+        isAccessibilityTrusted: { true },
+        createTap: { _, _ in MockTapSession() },
+        scheduleWorker: { work in pendingWorkers.withLock { $0.append(work) } },
+        scheduleRetry: { _ in {} }
+    )
+    let manager = EventTapManager(trigger: .rightOption, environment: env)
+    let keyDownCount = LockedBox(0)
+    let keyUpCount = LockedBox(0)
+    manager.onKeyDown = { keyDownCount.withLock { $0 += 1 } }
+    manager.onKeyUp = { keyUpCount.withLock { $0 += 1 } }
+
+    // 1. .stopped ignores processFlagsChanged
+    assert(manager.lifecycleState == .stopped)
+    manager.processFlagsChanged(
+        keyCode: EventTapManager.Constants.rightOptionKeyCode,
+        flags: EventTapManager.Constants.rightOptionMask
+    )
+    assert(manager.keyPressState == .released, "processFlagsChanged must be ignored when .stopped")
+    assert(keyDownCount.value == 0 && keyUpCount.value == 0)
+
+    // 2. .waitingForPermission ignores processFlagsChanged
+    assert(!manager.start())
+    assert(manager.lifecycleState == .waitingForPermission)
+    manager.processFlagsChanged(
+        keyCode: EventTapManager.Constants.rightOptionKeyCode,
+        flags: EventTapManager.Constants.rightOptionMask
+    )
+    assert(manager.keyPressState == .released, "processFlagsChanged must be ignored when .waitingForPermission")
+    assert(keyDownCount.value == 0 && keyUpCount.value == 0)
+
+    // 3. .starting ignores processFlagsChanged until worker reaches .running
+    inputMonitoringGranted.withLock { $0 = true }
+    assert(manager.start())
+    assert(manager.lifecycleState == .starting)
+    manager.processFlagsChanged(
+        keyCode: EventTapManager.Constants.rightOptionKeyCode,
+        flags: EventTapManager.Constants.rightOptionMask
+    )
+    assert(manager.keyPressState == .released, "processFlagsChanged must be ignored when .starting")
+    assert(keyDownCount.value == 0 && keyUpCount.value == 0)
+
+    // 4. .running accepts, and after stop() ignores stale callbacks
+    pendingWorkers.value[0]()
+    assert(manager.lifecycleState == .running)
+    manager.processFlagsChanged(
+        keyCode: EventTapManager.Constants.rightOptionKeyCode,
+        flags: EventTapManager.Constants.rightOptionMask
+    )
+    assert(manager.keyPressState == .pressed)
+    assert(keyDownCount.value == 1)
+
+    manager.stop()
+    assert(manager.lifecycleState == .stopped)
+    assert(manager.keyPressState == .released)
+    assert(keyUpCount.value == 1)
+
+    manager.processFlagsChanged(
+        keyCode: EventTapManager.Constants.rightOptionKeyCode,
+        flags: EventTapManager.Constants.rightOptionMask
+    )
+    assert(manager.keyPressState == .released, "Stale processFlagsChanged after stop() must not transition to .pressed")
+    assert(keyDownCount.value == 1 && keyUpCount.value == 1)
+
+    print("✔ EventTapManager processFlagsChanged gated on .running verified")
+}
+
 private func testKeyPressStateTransitions() {
     // Slice 1: PTTKeyPressState transitions via processFlagsChanged(keyCode:flags:)
-    let manager = EventTapManager(trigger: .rightOption)
-    let keyDownCount = AtomicBox(0)
-    let keyUpCount = AtomicBox(0)
-    manager.onKeyDown = { keyDownCount.mutate { $0 += 1 } }
-    manager.onKeyUp = { keyUpCount.mutate { $0 += 1 } }
+    let manager = makeRunningManager(trigger: .rightOption)
+    let keyDownCount = LockedBox(0)
+    let keyUpCount = LockedBox(0)
+    manager.onKeyDown = { keyDownCount.withLock { $0 += 1 } }
+    manager.onKeyUp = { keyUpCount.withLock { $0 += 1 } }
 
     assert(manager.keyPressState == PTTKeyPressState.released, "Initial keyPressState must be .released")
 
@@ -110,17 +179,16 @@ private func testKeyPressStateTransitions() {
 }
 
 private func testModifierResyncAndStopReset() {
-    let liveFlags = AtomicBox<UInt64>(0)
-    let env = EventTapEnvironment(currentModifierFlags: { liveFlags.value })
-    let manager = EventTapManager(trigger: .rightOption, environment: env)
+    let liveFlags = LockedBox<UInt64>(0)
+    let manager = makeRunningManager(trigger: .rightOption, currentModifierFlags: { liveFlags.value })
 
-    let keyDownCount = AtomicBox(0)
-    let keyUpCount = AtomicBox(0)
-    manager.onKeyDown = { keyDownCount.mutate { $0 += 1 } }
-    manager.onKeyUp = { keyUpCount.mutate { $0 += 1 } }
+    let keyDownCount = LockedBox(0)
+    let keyUpCount = LockedBox(0)
+    manager.onKeyDown = { keyDownCount.withLock { $0 += 1 } }
+    manager.onKeyUp = { keyUpCount.withLock { $0 += 1 } }
 
     // Resync while released even if option is physically held must not synthesize KeyDown
-    liveFlags.mutate { $0 = EventTapManager.Constants.rightOptionMask }
+    liveFlags.withLock { $0 = EventTapManager.Constants.rightOptionMask }
     manager.resyncModifierState()
     assert(manager.keyPressState == .released, "Resync from .released must not synthesize .pressed")
     assert(keyDownCount.value == 0 && keyUpCount.value == 0)
@@ -139,7 +207,7 @@ private func testModifierResyncAndStopReset() {
     assert(keyUpCount.value == 0)
 
     // Resync after trigger was physically released recovers stuck .pressed -> .released and fires onKeyUp
-    liveFlags.mutate { $0 = 0 }
+    liveFlags.withLock { $0 = 0 }
     manager.resyncModifierState()
     assert(manager.keyPressState == .released, "Resync when trigger physically up must recover to .released")
     assert(keyUpCount.value == 1, "Resync recovery must fire onKeyUp")
@@ -203,13 +271,13 @@ private final class MockTapSession: EventTapSession, @unchecked Sendable {
 }
 
 private func testLifecycleAndPermissionRetry() {
-    let inputMonitoringGranted = AtomicBox(false)
-    let accessibilityGranted = AtomicBox(false)
-    let retryScheduleCount = AtomicBox(0)
-    let retryCancelCount = AtomicBox(0)
-    let retryTick = AtomicBox<(@Sendable () -> Void)?>(nil)
-    let pendingWorkers = AtomicBox<[@Sendable () -> Void]>([])
-    let createdSessions = AtomicBox<[MockTapSession]>([])
+    let inputMonitoringGranted = LockedBox(false)
+    let accessibilityGranted = LockedBox(false)
+    let retryScheduleCount = LockedBox(0)
+    let retryCancelCount = LockedBox(0)
+    let retryTick = LockedBox<(@Sendable () -> Void)?>(nil)
+    let pendingWorkers = LockedBox<[@Sendable () -> Void]>([])
+    let createdSessions = LockedBox<[MockTapSession]>([])
 
     let env = EventTapEnvironment(
         isInputMonitoringAllowed: { inputMonitoringGranted.value },
@@ -218,25 +286,25 @@ private func testLifecycleAndPermissionRetry() {
             let session = MockTapSession()
             session.onDisabled = onDisabled
             session.onFlagsChanged = onFlagsChanged
-            createdSessions.mutate { $0.append(session) }
+            createdSessions.withLock { $0.append(session) }
             return session
         },
         scheduleWorker: { work in
-            pendingWorkers.mutate { $0.append(work) }
+            pendingWorkers.withLock { $0.append(work) }
         },
         scheduleRetry: { tick in
-            retryScheduleCount.mutate { $0 += 1 }
-            retryTick.mutate { $0 = tick }
+            retryScheduleCount.withLock { $0 += 1 }
+            retryTick.withLock { $0 = tick }
             return {
-                retryCancelCount.mutate { $0 += 1 }
+                retryCancelCount.withLock { $0 += 1 }
             }
         }
     )
 
     let manager = EventTapManager(trigger: .rightOption, environment: env)
-    let transitions = AtomicBox<[EventTapLifecycleState]>([])
+    let transitions = LockedBox<[EventTapLifecycleState]>([])
     manager.onLifecycleStateChange = { state in
-        transitions.mutate { $0.append(state) }
+        transitions.withLock { $0.append(state) }
     }
 
     assert(manager.lifecycleState == .stopped, "Initial lifecycleState must be .stopped")
@@ -261,8 +329,8 @@ private func testLifecycleAndPermissionRetry() {
     assert(createdSessions.value.isEmpty)
 
     // Grant Input Monitoring + Accessibility and trigger retry tick
-    inputMonitoringGranted.mutate { $0 = true }
-    accessibilityGranted.mutate { $0 = true }
+    inputMonitoringGranted.withLock { $0 = true }
+    accessibilityGranted.withLock { $0 = true }
     retryTick.value?()
 
     assert(manager.lifecycleState == .starting, "Successful retry must enter .starting before worker executes")
@@ -292,13 +360,13 @@ private func testLifecycleAndPermissionRetry() {
 }
 
 private func testStartStopRetryRaceInvariants() {
-    let inputMonitoringGranted = AtomicBox(true)
-    let accessibilityGranted = AtomicBox(true)
-    let retryTick = AtomicBox<(@Sendable () -> Void)?>(nil)
-    let retryCancelCount = AtomicBox(0)
-    let pendingWorkers = AtomicBox<[@Sendable () -> Void]>([])
-    let createdSessions = AtomicBox<[MockTapSession]>([])
-    let tapCreateShouldFail = AtomicBox(false)
+    let inputMonitoringGranted = LockedBox(true)
+    let accessibilityGranted = LockedBox(true)
+    let retryTick = LockedBox<(@Sendable () -> Void)?>(nil)
+    let retryCancelCount = LockedBox(0)
+    let pendingWorkers = LockedBox<[@Sendable () -> Void]>([])
+    let createdSessions = LockedBox<[MockTapSession]>([])
+    let tapCreateShouldFail = LockedBox(false)
 
     let env = EventTapEnvironment(
         isInputMonitoringAllowed: { inputMonitoringGranted.value },
@@ -308,16 +376,16 @@ private func testStartStopRetryRaceInvariants() {
             let session = MockTapSession()
             session.onDisabled = onDisabled
             session.onFlagsChanged = onFlagsChanged
-            createdSessions.mutate { $0.append(session) }
+            createdSessions.withLock { $0.append(session) }
             return session
         },
         scheduleWorker: { work in
-            pendingWorkers.mutate { $0.append(work) }
+            pendingWorkers.withLock { $0.append(work) }
         },
         scheduleRetry: { tick in
-            retryTick.mutate { $0 = tick }
+            retryTick.withLock { $0 = tick }
             return {
-                retryCancelCount.mutate { $0 += 1 }
+                retryCancelCount.withLock { $0 += 1 }
             }
         }
     )
@@ -368,7 +436,7 @@ private func testStartStopRetryRaceInvariants() {
     assert(createdSessions.value[2].reenableCount == 1, "tapDisabled after .stop must not reenable")
 
     // 5. stop() while .waitingForPermission cancels retry and invalidates captured retry tick
-    tapCreateShouldFail.mutate { $0 = true }
+    tapCreateShouldFail.withLock { $0 = true }
     assert(!manager.start())
     assert(manager.lifecycleState == .waitingForPermission)
     manager.stop()
@@ -376,7 +444,7 @@ private func testStartStopRetryRaceInvariants() {
     assert(retryCancelCount.value == 1, "stop() while waiting must cancel retry observer")
 
     // Even if a queued timer tick executes after stop(), it must not restart
-    tapCreateShouldFail.mutate { $0 = false }
+    tapCreateShouldFail.withLock { $0 = false }
     retryTick.value?()
     assert(manager.lifecycleState == .stopped, "Stale retry tick after stop() must not restart manager")
     assert(createdSessions.value.count == 3)
@@ -386,9 +454,9 @@ private func testStartStopRetryRaceInvariants() {
 
 @MainActor
 private func testHotkeyServiceLiveStateSync() async {
-    let inputMonitoringGranted = AtomicBox(false)
-    let accessibilityGranted = AtomicBox(true)
-    let retryTick = AtomicBox<(@Sendable () -> Void)?>(nil)
+    let inputMonitoringGranted = LockedBox(false)
+    let accessibilityGranted = LockedBox(true)
+    let retryTick = LockedBox<(@Sendable () -> Void)?>(nil)
 
     let env = EventTapEnvironment(
         isInputMonitoringAllowed: { inputMonitoringGranted.value },
@@ -401,7 +469,7 @@ private func testHotkeyServiceLiveStateSync() async {
             }
         },
         scheduleRetry: { tick in
-            retryTick.mutate { $0 = tick }
+            retryTick.withLock { $0 = tick }
             return {}
         }
     )
@@ -424,7 +492,7 @@ private func testHotkeyServiceLiveStateSync() async {
     assert(!service.isTapRunning)
 
     // Grant Input Monitoring and fire retry observer -> HotkeyService updates live to running
-    inputMonitoringGranted.mutate { $0 = true }
+    inputMonitoringGranted.withLock { $0 = true }
     retryTick.value?()
 
     var waitCount = 0

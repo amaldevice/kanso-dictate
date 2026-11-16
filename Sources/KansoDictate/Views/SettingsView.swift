@@ -1,5 +1,4 @@
 import SwiftUI
-import Combine
 import KansoCore
 import AVFoundation
 import AppKit
@@ -28,7 +27,6 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var elevenlabsModel: String
     @Published public var pttTrigger: PTTTriggerKey
     public let permissionCoordinator: PermissionPollingCoordinator
-    private var permissionCancellable: AnyCancellable?
     public var onSettingsChanged: (@MainActor () -> Void)?
     public var onHotkeyChanged: (@MainActor (PTTTriggerKey) -> Void)?
     public init(
@@ -36,8 +34,7 @@ public final class SettingsViewModel: ObservableObject {
         permissionCoordinator: PermissionPollingCoordinator? = nil
     ) {
         self.onSettingsChanged = onSettingsChanged
-        let coordinator = permissionCoordinator ?? PermissionPollingCoordinator()
-        self.permissionCoordinator = coordinator
+        self.permissionCoordinator = permissionCoordinator ?? PermissionPollingCoordinator()
         self.pttTrigger = PTTTriggerKey.load()
         let rawMode = UserDefaults.standard.string(forKey: "stt_provider_mode") ?? STTProviderMode.remote.rawValue
         self.providerMode = STTProviderMode(rawValue: rawMode) ?? .remote
@@ -60,17 +57,6 @@ public final class SettingsViewModel: ObservableObject {
         self.revaiModel = UserDefaults.standard.string(forKey: "revai_model") ?? RevAISTTConfig.defaultModel
         self.elevenlabsApiKey = UserDefaults.standard.string(forKey: "elevenlabs_api_key") ?? ""
         self.elevenlabsModel = UserDefaults.standard.string(forKey: "elevenlabs_model") ?? ElevenLabsSTTConfig.defaultModel
-        self.permissionCancellable = coordinator.objectWillChange.sink { [weak self] _ in
-            if Thread.isMainThread {
-                MainActor.assumeIsolated {
-                    self?.objectWillChange.send()
-                }
-            } else {
-                Task { @MainActor [weak self] in
-                    self?.objectWillChange.send()
-                }
-            }
-        }
     }
 
     public func save() {
@@ -104,51 +90,6 @@ public final class SettingsViewModel: ObservableObject {
         save()
     }
 
-    public var isAccessibilityGranted: Bool {
-        permissionCoordinator.status.isAccessibilityGranted
-    }
-
-    public var isMicrophoneGranted: Bool {
-        permissionCoordinator.status.isMicrophoneGranted
-    }
-
-    public var isInputMonitoringGranted: Bool {
-        permissionCoordinator.status.isInputMonitoringGranted
-    }
-
-    public var allPermissionsGranted: Bool {
-        permissionCoordinator.status.allGranted
-    }
-
-    public var pollingState: PermissionPollingState {
-        permissionCoordinator.state
-    }
-
-    public func refreshPermissions() {
-        permissionCoordinator.refreshPermissions()
-    }
-
-    public func startPermissionPolling() {
-        permissionCoordinator.startPolling()
-    }
-
-    public func stopPermissionPolling() {
-        permissionCoordinator.stopPolling()
-    }
-
-    public func attachHostingWindow(_ window: NSWindow?) {
-        permissionCoordinator.attachWindow(window)
-    }
-
-    public func handleViewAppear() {
-        permissionCoordinator.handleViewAppear()
-    }
-
-    public func handleViewDisappear() {
-        permissionCoordinator.handleViewDisappear()
-    }
-
-
     public func openInputMonitoringSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
             NSWorkspace.shared.open(url)
@@ -165,6 +106,7 @@ public final class SettingsViewModel: ObservableObject {
 
 public struct SettingsView: View {
     @ObservedObject var viewModel: SettingsViewModel
+    @ObservedObject private var permissionCoordinator: PermissionPollingCoordinator
 
     public init(
         viewModel: SettingsViewModel? = nil,
@@ -185,6 +127,7 @@ public struct SettingsView: View {
             vm.onHotkeyChanged = onHotkeyChanged
         }
         self.viewModel = vm
+        self.permissionCoordinator = vm.permissionCoordinator
     }
 
     public var body: some View {
@@ -367,22 +310,23 @@ public struct SettingsView: View {
             }
 
             Section("Permissions") {
+                let permissions = permissionCoordinator.status
                 HStack {
                     Label(
-                        "Accessibility — \(viewModel.isAccessibilityGranted ? "Granted" : "Not Granted")",
-                        systemImage: viewModel.isAccessibilityGranted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                        "Accessibility — \(permissions.isAccessibilityGranted ? "Granted" : "Not Granted")",
+                        systemImage: permissions.isAccessibilityGranted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
                     )
-                    .foregroundColor(viewModel.isAccessibilityGranted ? .green : .orange)
+                    .foregroundColor(permissions.isAccessibilityGranted ? .green : .orange)
 
                     Spacer()
 
                     Button("Refresh Status") {
-                        viewModel.refreshPermissions()
+                        permissionCoordinator.refreshPermissions()
                     }
-                    if !viewModel.isAccessibilityGranted {
+                    if !permissions.isAccessibilityGranted {
                         Button("Grant Access") {
                             _ = EventTapManager.isAccessibilityTrusted(prompt: true)
-                            viewModel.refreshPermissions()
+                            permissionCoordinator.refreshPermissions()
                         }
                     }
                     Button("Open System Settings") {
@@ -396,20 +340,20 @@ public struct SettingsView: View {
 
                 HStack {
                     Label(
-                        "Input Monitoring — \(viewModel.isInputMonitoringGranted ? "Granted" : "Not Granted")",
-                        systemImage: viewModel.isInputMonitoringGranted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                        "Input Monitoring — \(permissions.isInputMonitoringGranted ? "Granted" : "Not Granted")",
+                        systemImage: permissions.isInputMonitoringGranted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
                     )
-                    .foregroundColor(viewModel.isInputMonitoringGranted ? .green : .orange)
+                    .foregroundColor(permissions.isInputMonitoringGranted ? .green : .orange)
 
                     Spacer()
 
                     Button("Refresh Status") {
-                        viewModel.refreshPermissions()
+                        permissionCoordinator.refreshPermissions()
                     }
-                    if !viewModel.isInputMonitoringGranted {
+                    if !permissions.isInputMonitoringGranted {
                         Button("Request Access") {
                             _ = EventTapManager.requestInputMonitoring()
-                            viewModel.refreshPermissions()
+                            permissionCoordinator.refreshPermissions()
                         }
                     }
                     Button("Open System Settings") {
@@ -417,33 +361,33 @@ public struct SettingsView: View {
                     }
                 }
 
-                Text(viewModel.isInputMonitoringGranted ? "Granted — global Option key monitoring is authorized." : "Required to detect Option globally. Enable Kanso Dictate under System Settings → Privacy & Security → Input Monitoring.")
+                Text(permissions.isInputMonitoringGranted ? "Granted — global Option key monitoring is authorized." : "Required to detect Option globally. Enable Kanso Dictate under System Settings → Privacy & Security → Input Monitoring.")
                     .font(.caption)
                     .foregroundColor(.secondary)
 
                 HStack {
                     Label(
-                        "Microphone — \(viewModel.isMicrophoneGranted ? "Granted" : "Not Granted")",
-                        systemImage: viewModel.isMicrophoneGranted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                        "Microphone — \(permissions.isMicrophoneGranted ? "Granted" : "Not Granted")",
+                        systemImage: permissions.isMicrophoneGranted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
                     )
-                    .foregroundColor(viewModel.isMicrophoneGranted ? .green : .orange)
+                    .foregroundColor(permissions.isMicrophoneGranted ? .green : .orange)
 
                     Spacer()
 
-                    if !viewModel.isMicrophoneGranted {
+                    if !permissions.isMicrophoneGranted {
                         Button("Grant Access") {
                             AVCaptureDevice.requestAccess(for: .audio) { _ in
-                                Task { @MainActor in viewModel.refreshPermissions() }
+                                Task { @MainActor in permissionCoordinator.refreshPermissions() }
                             }
                         }
                     }
                 }
 
-                Text(viewModel.isMicrophoneGranted ? "Granted — audio capture ready." : "Required for audio capture. macOS prompts once; if denied, enable in System Settings → Privacy → Microphone.")
+                Text(permissions.isMicrophoneGranted ? "Granted — audio capture ready." : "Required for audio capture. macOS prompts once; if denied, enable in System Settings → Privacy → Microphone.")
                     .font(.caption)
                     .foregroundColor(.secondary)
 
-                if !viewModel.allPermissionsGranted {
+                if !permissions.allGranted {
                     VStack(alignment: .leading, spacing: 4) {
                         Label("Already ON in System Settings but still Not Granted here?", systemImage: "arrow.triangle.2.circlepath")
                             .font(.caption.bold())
@@ -463,12 +407,12 @@ public struct SettingsView: View {
         }
         .frame(minWidth: 480, minHeight: 460)
         .onAppear {
-            viewModel.handleViewAppear()
+            permissionCoordinator.handleViewAppear()
         }
         .onDisappear {
-            viewModel.handleViewDisappear()
+            permissionCoordinator.handleViewDisappear()
         }
-        .background(HostingWindowFinder { viewModel.attachHostingWindow($0) })
+        .background(HostingWindowFinder { permissionCoordinator.attachWindow($0) })
     }
 }
 

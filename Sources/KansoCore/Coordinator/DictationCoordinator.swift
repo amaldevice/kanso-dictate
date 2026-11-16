@@ -233,15 +233,6 @@ public final class DictationCoordinator: ObservableObject {
         }
     }
 
-    /// Cancels any active recording or in-flight transcription/injection pipeline and resets to `.idle`.
-    public func cancelDictation() {
-        invalidatePipeline()
-        if recorder.isRecording {
-            _ = try? recorder.stopRecording()
-        }
-        state = .idle
-    }
-
     @discardableResult
     private func invalidatePipeline() -> UInt64 {
         pipelineGeneration &+= 1

@@ -67,9 +67,14 @@ public final class FloatingHUDController: ObservableObject {
 
         case .showPanel(let fadeIn):
             repositionPanel()
-            if fadeIn {
-                panel.alphaValue = 0.0
+            let startAlpha: CGFloat = fadeIn ? 0.0 : panel.alphaValue
+            // Cancel any in-flight fade-out animation before ordering front and fading in.
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0
+                context.allowsImplicitAnimation = false
+                panel.animator().alphaValue = startAlpha
             }
+            panel.alphaValue = startAlpha
             panel.orderFrontRegardless()
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.15

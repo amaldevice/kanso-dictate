@@ -187,7 +187,7 @@ private func testStaleTranscriptionIgnoredWhenSupersededByNewCycle() async {
 }
 
 @MainActor
-private func testCancelDictationResetsAndIgnoresLateErrorAndResult() async {
+private func testSupersededErrorAndMicroTapAbortIgnoreStaleTasks() async {
     let recorder = PipelineMockAudioRecorder(stubbedDuration: 1.0)
     let engine = ControllableSTTEngine()
     let (coordinator, historyStore, cleanup) = makeTestCoordinator(recorder: recorder, engine: engine)
@@ -198,31 +198,35 @@ private func testCancelDictationResetsAndIgnoresLateErrorAndResult() async {
         notifiedErrors.append(message)
     }
 
-    // 1. Cancel during .recording stops recorder and resets to .idle
+    // 1. startDictation() while already .recording is a no-op
     coordinator.startDictation()
     assert(coordinator.state == .recording)
-    assert(recorder.isRecording)
-    coordinator.cancelDictation()
-    assert(coordinator.state == .idle, "cancelDictation during .recording must return to .idle")
-    assert(!recorder.isRecording, "cancelDictation must stop active recorder")
-
-    // 2. Cancel during .transcribing cancels task and ignores late error
     coordinator.startDictation()
+    assert(coordinator.state == .recording)
+    assert(recorder.startCount == 1, "startDictation while already .recording must not restart recorder")
+
+    // 2. Superseded .transcribing task failing with late error does not enter .error or notify
     coordinator.stopDictation()
     assert(coordinator.state == .transcribing)
     await engine.waitForCall(count: 1)
 
-    coordinator.cancelDictation()
-    assert(coordinator.state == .idle, "cancelDictation during .transcribing must return to .idle")
-    assert(engine.observedCancellations == 1, "cancelDictation must cancel in-flight transcription task")
+    coordinator.startDictation()
+    assert(coordinator.state == .recording, "startDictation must supersede .transcribing")
+    assert(engine.observedCancellations == 1, "Superseding .transcribing must cancel in-flight task")
 
     engine.failCall(at: 0, with: STTError.networkError("Stale network failure"))
     try? await Task.sleep(nanoseconds: 50_000_000)
 
-    assert(coordinator.state == .idle, "Late error from cancelled task must NOT enter .error; got \(coordinator.state)")
-    assert(notifiedErrors.isEmpty, "Late error from cancelled task must NOT notify")
+    assert(coordinator.state == .recording, "Late error from superseded task must NOT overwrite .recording; got \(coordinator.state)")
+    assert(notifiedErrors.isEmpty, "Late error from superseded task must NOT notify")
+
+    // Complete Cycle 2 with a micro-tap (<0.3s) to abort cleanly back to .idle
+    recorder.stubbedDuration = 0.1
+    coordinator.stopDictation()
+    assert(coordinator.state == .idle, "Micro-tap stopDictation must return to .idle")
 
     // 3. Rapid micro-tap cycle after superseding an in-flight transcription ignores late success
+    recorder.stubbedDuration = 1.0
     coordinator.startDictation()
     coordinator.stopDictation()
     assert(coordinator.state == .transcribing)
@@ -282,8 +286,8 @@ private func testOutOfOrderCompletionAcrossRapidCycles() async {
 func runCoordinatorPipelineTests() async {
     await testStaleTranscriptionIgnoredWhenSupersededByNewCycle()
     print("✔ DictationCoordinator stale transcription superseded by new cycle verified")
-    await testCancelDictationResetsAndIgnoresLateErrorAndResult()
-    print("✔ DictationCoordinator cancelDictation and stale error/micro-tap ignoring verified")
+    await testSupersededErrorAndMicroTapAbortIgnoreStaleTasks()
+    print("✔ DictationCoordinator superseded error and micro-tap stale-task ignoring verified")
     await testOutOfOrderCompletionAcrossRapidCycles()
     print("✔ DictationCoordinator out-of-order stale completion across rapid cycles verified")
 }
