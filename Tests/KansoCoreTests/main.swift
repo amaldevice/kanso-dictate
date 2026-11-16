@@ -2264,4 +2264,5 @@ func testTrimmedFactoryCredentials() async {
 
 await testTrimmedFactoryCredentials()
 print("✔ DictationCoordinator trimmed credentials verified")
+runHUDStateMachineTests()
 print("All KansoCore tests passed successfully! 🎉")

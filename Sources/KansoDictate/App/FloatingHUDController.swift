@@ -9,6 +9,9 @@ public final class FloatingHUDController: ObservableObject {
     private var panel: NSPanel?
     private var cancellables = Set<AnyCancellable>()
     private let coordinator: DictationCoordinator
+    private var stateMachine = HUDPresentationStateMachine()
+    private var errorDismissTask: Task<Void, Never>?
+    private let errorDismissDuration: Duration = .seconds(3)
 
     public init(coordinator: DictationCoordinator) {
         self.coordinator = coordinator
@@ -43,38 +46,61 @@ public final class FloatingHUDController: ObservableObject {
         coordinator.$state
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in
-                self?.handleStateChange(state)
+                self?.handleEvent(.dictationStateChanged(state))
             }
             .store(in: &cancellables)
     }
 
-    private func handleStateChange(_ state: DictationState) {
+    private func handleEvent(_ event: HUDPresentationEvent) {
+        for action in stateMachine.handle(event) {
+            execute(action)
+        }
+    }
+
+    private func execute(_ action: HUDPresentationAction) {
         guard let panel = panel else { return }
 
-        switch state {
-        case .recording, .transcribing, .inserting:
+        switch action {
+        case .cancelErrorDismiss:
+            errorDismissTask?.cancel()
+            errorDismissTask = nil
+
+        case .showPanel(let fadeIn):
             repositionPanel()
-            if !panel.isVisible {
+            if fadeIn {
                 panel.alphaValue = 0.0
-                panel.orderFrontRegardless()
-                NSAnimationContext.runAnimationGroup { context in
-                    context.duration = 0.15
-                    panel.animator().alphaValue = 1.0
-                }
             }
-
-        case .error:
-            repositionPanel()
             panel.orderFrontRegardless()
-            // Auto dismiss error after 3 seconds if not cleared
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-                if case .error = self?.coordinator.state {
-                    self?.dismissPanel()
-                }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.15
+                panel.animator().alphaValue = 1.0
             }
 
-        case .idle:
-            dismissPanel()
+        case .scheduleErrorDismiss(let generation):
+            errorDismissTask?.cancel()
+            let delay = errorDismissDuration
+            errorDismissTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: delay)
+                guard !Task.isCancelled else { return }
+                self?.handleEvent(.errorTimeoutFired(generation: generation))
+            }
+
+        case .beginFadeOut(let generation):
+            guard panel.isVisible else {
+                handleEvent(.fadeOutCompleted(generation: generation))
+                return
+            }
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.2
+                panel.animator().alphaValue = 0.0
+            }, completionHandler: { [weak self] in
+                Task { @MainActor [weak self] in
+                    self?.handleEvent(.fadeOutCompleted(generation: generation))
+                }
+            })
+
+        case .hidePanel:
+            panel.orderOut(nil)
         }
     }
 
@@ -88,17 +114,5 @@ public final class FloatingHUDController: ObservableObject {
         let y = screenRect.origin.y + 80 // Position 80pt above dock/bottom
 
         panel.setFrame(NSRect(x: x, y: y, width: panelWidth, height: panelHeight), display: true)
-    }
-
-    private func dismissPanel() {
-        guard let panel = panel, panel.isVisible else { return }
-        NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.2
-            panel.animator().alphaValue = 0.0
-        }, completionHandler: {
-            DispatchQueue.main.async {
-                panel.orderOut(nil)
-            }
-        })
     }
 }
