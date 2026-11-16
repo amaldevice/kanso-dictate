@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import KansoCore
 import AVFoundation
 import AppKit
@@ -25,14 +26,18 @@ public final class SettingsViewModel: ObservableObject {
     @Published public var revaiModel: String
     @Published public var elevenlabsApiKey: String
     @Published public var elevenlabsModel: String
-    @Published public var isAccessibilityGranted: Bool
-    @Published public var isMicrophoneGranted: Bool
-    @Published public var isInputMonitoringGranted: Bool
     @Published public var pttTrigger: PTTTriggerKey
+    public let permissionCoordinator: PermissionPollingCoordinator
+    private var permissionCancellable: AnyCancellable?
     public var onSettingsChanged: (@MainActor () -> Void)?
     public var onHotkeyChanged: (@MainActor (PTTTriggerKey) -> Void)?
-    public init(onSettingsChanged: (@MainActor () -> Void)? = nil) {
+    public init(
+        onSettingsChanged: (@MainActor () -> Void)? = nil,
+        permissionCoordinator: PermissionPollingCoordinator? = nil
+    ) {
         self.onSettingsChanged = onSettingsChanged
+        let coordinator = permissionCoordinator ?? PermissionPollingCoordinator()
+        self.permissionCoordinator = coordinator
         self.pttTrigger = PTTTriggerKey.load()
         let rawMode = UserDefaults.standard.string(forKey: "stt_provider_mode") ?? STTProviderMode.remote.rawValue
         self.providerMode = STTProviderMode(rawValue: rawMode) ?? .remote
@@ -55,9 +60,17 @@ public final class SettingsViewModel: ObservableObject {
         self.revaiModel = UserDefaults.standard.string(forKey: "revai_model") ?? RevAISTTConfig.defaultModel
         self.elevenlabsApiKey = UserDefaults.standard.string(forKey: "elevenlabs_api_key") ?? ""
         self.elevenlabsModel = UserDefaults.standard.string(forKey: "elevenlabs_model") ?? ElevenLabsSTTConfig.defaultModel
-        self.isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
-        self.isMicrophoneGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-        self.isInputMonitoringGranted = EventTapManager.isInputMonitoringAllowed()
+        self.permissionCancellable = coordinator.objectWillChange.sink { [weak self] _ in
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    self?.objectWillChange.send()
+                }
+            } else {
+                Task { @MainActor [weak self] in
+                    self?.objectWillChange.send()
+                }
+            }
+        }
     }
 
     public func save() {
@@ -91,46 +104,48 @@ public final class SettingsViewModel: ObservableObject {
         save()
     }
 
-    public func refreshPermissions() {
-        // Assign only on change: with 1s polling below, unconditional assigns
-        // would republish (and re-render the form) every tick.
-        let accessibility = EventTapManager.isAccessibilityTrusted(prompt: false)
-        let microphone = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-        let inputMonitoring = EventTapManager.isInputMonitoringAllowed()
-        if isAccessibilityGranted != accessibility { isAccessibilityGranted = accessibility }
-        if isMicrophoneGranted != microphone { isMicrophoneGranted = microphone }
-        if isInputMonitoringGranted != inputMonitoring { isInputMonitoringGranted = inputMonitoring }
+    public var isAccessibilityGranted: Bool {
+        permissionCoordinator.status.isAccessibilityGranted
+    }
+
+    public var isMicrophoneGranted: Bool {
+        permissionCoordinator.status.isMicrophoneGranted
+    }
+
+    public var isInputMonitoringGranted: Bool {
+        permissionCoordinator.status.isInputMonitoringGranted
     }
 
     public var allPermissionsGranted: Bool {
-        isAccessibilityGranted && isInputMonitoringGranted && isMicrophoneGranted
+        permissionCoordinator.status.allGranted
     }
 
-    private var permissionPollTimer: Timer?
+    public var pollingState: PermissionPollingState {
+        permissionCoordinator.state
+    }
 
-    /// The NSWindow hosting the Settings view, reported by HostingWindowFinder;
-    /// used to stop the poll exactly when that window closes.
-    public var hostingWindow: NSWindow?
+    public func refreshPermissions() {
+        permissionCoordinator.refreshPermissions()
+    }
 
-    /// macOS emits no notification when a TCC toggle flips in System Settings,
-    /// so poll while the Settings window is open and something is still missing.
-    /// Auto-stops once every permission is granted.
     public func startPermissionPolling() {
-        guard !allPermissionsGranted, permissionPollTimer == nil else { return }
-        permissionPollTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                guard let self else { return }
-                self.refreshPermissions()
-                if self.allPermissionsGranted {
-                    self.stopPermissionPolling()
-                }
-            }
-        }
+        permissionCoordinator.startPolling()
     }
 
     public func stopPermissionPolling() {
-        permissionPollTimer?.invalidate()
-        permissionPollTimer = nil
+        permissionCoordinator.stopPolling()
+    }
+
+    public func attachHostingWindow(_ window: NSWindow?) {
+        permissionCoordinator.attachWindow(window)
+    }
+
+    public func handleViewAppear() {
+        permissionCoordinator.handleViewAppear()
+    }
+
+    public func handleViewDisappear() {
+        permissionCoordinator.handleViewDisappear()
     }
 
 
@@ -448,24 +463,12 @@ public struct SettingsView: View {
         }
         .frame(minWidth: 480, minHeight: 460)
         .onAppear {
-            viewModel.refreshPermissions()
-            viewModel.startPermissionPolling()
+            viewModel.handleViewAppear()
         }
         .onDisappear {
-            viewModel.stopPermissionPolling()
+            viewModel.handleViewDisappear()
         }
-        // The settings window is cached (isReleasedWhenClosed = false), so
-        // onDisappear may never fire; stop polling when OUR window closes.
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { note in
-            if let closing = note.object as? NSWindow, closing === viewModel.hostingWindow {
-                viewModel.stopPermissionPolling()
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            // User may have flipped a TCC toggle in System Settings; re-check on return.
-            viewModel.refreshPermissions()
-        }
-        .background(HostingWindowFinder { viewModel.hostingWindow = $0 })
+        .background(HostingWindowFinder { viewModel.attachHostingWindow($0) })
     }
 }
 
