@@ -114,36 +114,34 @@ public final class RevAISTTEngine: SpeechToTextEngine, @unchecked Sendable {
 
     public func transcribe(audioData: Data, language: String?, prompt: String?) async throws -> TranscriptionResult {
         let startTime = CFAbsoluteTimeGetCurrent()
-        let (submitData, submitHTTP) = try await send(try buildSubmitRequest(audioData: audioData, language: language, prompt: prompt))
-        guard (200...299).contains(submitHTTP.statusCode) else {
-            throw mapHTTPError(statusCode: submitHTTP.statusCode, serverMessage: parseErrorMessage(from: submitData, statusCode: submitHTTP.statusCode))
-        }
-        let jobID = try parseJobID(from: submitData)
-        for _ in 0..<config.maxPollAttempts {
-            let (pollData, pollHTTP) = try await send(try buildPollRequest(jobID: jobID))
-            guard (200...299).contains(pollHTTP.statusCode) else {
-                throw mapHTTPError(statusCode: pollHTTP.statusCode, serverMessage: parseErrorMessage(from: pollData, statusCode: pollHTTP.statusCode))
+        return try await BatchJobPoller.run(
+            pollInterval: config.pollInterval,
+            maxPollAttempts: config.maxPollAttempts,
+            submit: {
+                let submitData = try await self.send(try self.buildSubmitRequest(audioData: audioData, language: language, prompt: prompt))
+                return try self.parseJobID(from: submitData)
+            },
+            poll: { jobID -> BatchJobPollOutcome<Bool> in
+                let pollData = try await self.send(try self.buildPollRequest(jobID: jobID))
+                return try self.parseJobDone(from: pollData) ? .ready(true) : .pending
+            },
+            fetch: { jobID, _ in
+                let transcriptData = try await self.send(try self.buildTranscriptRequest(jobID: jobID))
+                return try self.parseTranscript(from: transcriptData, fallbackDuration: CFAbsoluteTimeGetCurrent() - startTime)
+            },
+            timeoutError: { attempts in
+                STTError.networkError("Rev.ai transcription timed out after \(attempts) polls.")
             }
-            if try parseJobDone(from: pollData) {
-                let (tData, tHTTP) = try await send(try buildTranscriptRequest(jobID: jobID))
-                guard (200...299).contains(tHTTP.statusCode) else {
-                    throw mapHTTPError(statusCode: tHTTP.statusCode, serverMessage: parseErrorMessage(from: tData, statusCode: tHTTP.statusCode))
-                }
-                return try parseTranscript(from: tData, fallbackDuration: CFAbsoluteTimeGetCurrent() - startTime)
-            }
-            try? await Task.sleep(nanoseconds: UInt64(config.pollInterval * 1_000_000_000))
-        }
-        throw STTError.networkError("Rev.ai transcription timed out after \(config.maxPollAttempts) polls.")
+        )
     }
 
-    private func send(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        let data: Data
-        let response: URLResponse
-        do { (data, response) = try await session.data(for: request) } catch {
-            throw STTError.networkError(error.localizedDescription)
-        }
-        guard let http = response as? HTTPURLResponse else { throw STTError.networkError("Invalid non-HTTP response received.") }
-        return (data, http)
+    private func send(_ request: URLRequest) async throws -> Data {
+        try await BatchJobPoller.send(
+            request,
+            using: session,
+            parseErrorMessage: { parseErrorMessage(from: $0, statusCode: $1) },
+            mapHTTPError: { mapHTTPError(statusCode: $0, serverMessage: $1) }
+        )
     }
 
     private func mapHTTPError(statusCode: Int, serverMessage: String) -> STTError {
