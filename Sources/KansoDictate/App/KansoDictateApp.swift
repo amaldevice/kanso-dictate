@@ -61,61 +61,6 @@ public final class WindowManager: ObservableObject {
 }
 
 @MainActor
-public final class HotkeyService: ObservableObject {
-    public let manager = EventTapManager()
-    @Published public private(set) var isTapRunning = false
-    @Published public private(set) var trigger: PTTTriggerKey = PTTTriggerKey.load()
-    private weak var coordinator: DictationCoordinator?
-
-    public init() {}
-
-    public func attach(coordinator: DictationCoordinator) {
-        self.coordinator = coordinator
-        manager.onKeyDown = { [weak coordinator] in
-            Task { @MainActor in
-                coordinator?.startDictation()
-            }
-        }
-        manager.onKeyUp = { [weak coordinator] in
-            Task { @MainActor in
-                coordinator?.stopDictation()
-            }
-        }
-    }
-
-    @discardableResult
-    public func start() -> Bool {
-        manager.trigger = trigger
-        manager.resyncModifierState()
-        isTapRunning = manager.start()
-        return isTapRunning
-    }
-
-    /// Stops and recreates the tap (use after granting permissions or ad-hoc re-sign).
-    @discardableResult
-    public func restart() -> Bool {
-        manager.stop()
-        isTapRunning = false
-        return start()
-    }
-
-    public func resync() {
-        manager.resyncModifierState()
-    }
-
-    /// Applies a new trigger (from Settings) and restarts the tap so the change takes effect immediately.
-    public func setTrigger(_ newTrigger: PTTTriggerKey) {
-        trigger = newTrigger
-        newTrigger.save()
-        manager.trigger = newTrigger
-        manager.resyncModifierState()
-        if manager.isRunning {
-            restart()
-        }
-    }
-}
-
-@MainActor
 public final class HotkeyStatus: ObservableObject {
     @Published public var isAccessibilityGranted = EventTapManager.isAccessibilityTrusted(prompt: false)
     @Published public var isInputMonitoringGranted = EventTapManager.isInputMonitoringAllowed()
@@ -166,7 +111,7 @@ public struct KansoDictateApp: App {
         ) { [weak hotkeyServiceInstance] _ in
             Task { @MainActor in
                 hotkeyServiceInstance?.resync()
-                if hotkeyServiceInstance?.manager.isRunning == false {
+                if hotkeyServiceInstance?.tapState == .stopped || hotkeyServiceInstance?.tapState == .waitingForPermission {
                     _ = hotkeyServiceInstance?.start()
                 }
             }
@@ -279,6 +224,9 @@ public struct KansoDictateApp: App {
                 hotkeyService.resync()
                 hotkeyStatus.refresh()
             }
+        }
+        .onChange(of: hotkeyService.isTapRunning) { _, _ in
+            hotkeyStatus.refresh()
         }
     }
 }
